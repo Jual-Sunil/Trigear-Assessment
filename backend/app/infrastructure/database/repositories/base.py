@@ -101,18 +101,9 @@ class BaseRepository(Generic[ModelT]):
         Returns:
             The persisted instance with database-assigned fields populated.
         """
-        print(
-            f"CREATING {self._model.__name__}: {instance}"
-        )
-
         self._session.add(instance)
         await self._session.flush()
         await self._session.refresh(instance)
-
-        print(
-            f"CREATED {self._model.__name__}: {instance}"
-        )
-
         return instance
 
     async def update(self, instance: ModelT, data: dict[str, Any]) -> ModelT:

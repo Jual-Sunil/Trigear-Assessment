@@ -15,7 +15,12 @@ Task and career extraction failures are non-fatal; processing continues.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from time import perf_counter
 from uuid import UUID
 
 from infrastructure.ai.career_extraction.career_extraction_service import (
@@ -54,7 +59,7 @@ from infrastructure.database.models.email import Email
 from infrastructure.database.models.interview import Interview
 from infrastructure.database.models.job_opportunity import JobOpportunity
 from infrastructure.database.models.task import Task
-from infrastructure.database.repositories.email_repository import EmailRepository
+from infrastructure.database.repositories.email_repository import _UNSET, EmailRepository
 from infrastructure.database.repositories.interview_repository import (
     InterviewRepository,
 )
@@ -64,6 +69,60 @@ from infrastructure.database.repositories.job_opportunity_repository import (
 from infrastructure.database.repositories.task_repository import TaskRepository
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _stage_timer(timings: dict[str, float], stage: str) -> Iterator[None]:
+    """Record the wall-clock duration of a pipeline stage into ``timings``.
+
+    The duration is recorded even when the wrapped block raises, so failed
+    stages still contribute timing data for bottleneck analysis.
+
+    Args:
+        timings: Mutable mapping to write the elapsed seconds into.
+        stage: Key under which to store the elapsed duration.
+
+    Yields:
+        ``None``; the elapsed time is written on exit.
+    """
+    start = perf_counter()
+    try:
+        yield
+    finally:
+        timings[stage] = perf_counter() - start
+
+
+@dataclass(slots=True)
+class EmailProcessingOutcome:
+    """Computed AI results for a single email, ready to be persisted.
+
+    Produced by :meth:`EmailProcessingService.compute` (which performs no
+    database writes) and consumed by :meth:`EmailProcessingService.persist`.
+    Separating compute from persistence lets the compute phase run
+    concurrently across many emails while database writes remain serialized on
+    the shared, non-concurrency-safe :class:`AsyncSession`.
+
+    Attributes:
+        classification: Classification result, or ``None`` when skipped/failed.
+        priority: Priority score result, or ``None`` when skipped/failed.
+        summary: Summary result, or ``None`` when skipped/failed.
+        task_result: Task extraction result, or ``None`` when skipped/failed.
+        career_result: Career extraction result, or ``None`` when skipped/failed.
+        skip_tasks: ``True`` when task persistence must be skipped (already present).
+        skip_job: ``True`` when job persistence must be skipped (already present).
+        skip_interview: ``True`` when interview persistence must be skipped.
+        timings: Per-stage wall-clock durations in seconds.
+    """
+
+    classification: ClassificationResult | None = None
+    priority: PriorityScoreResult | None = None
+    summary: EmailSummaryResult | None = None
+    task_result: TaskExtractionResult | None = None
+    career_result: CareerExtractionResult | None = None
+    skip_tasks: bool = False
+    skip_job: bool = False
+    skip_interview: bool = False
+    timings: dict[str, float] = field(default_factory=dict)
 
 
 class EmailProcessingService:
@@ -125,13 +184,62 @@ class EmailProcessingService:
     async def process(self, email: Email) -> None:
         """Execute the full AI processing pipeline for a single email.
 
-        Stages are executed in dependency order. Each stage's output is
-        persisted before the next stage begins. Failures in task extraction
-        or career extraction are logged and do not abort the pipeline.
+        Convenience wrapper that runs :meth:`compute` followed by
+        :meth:`persist`. Idempotency checks (existing tasks/jobs/interviews)
+        are resolved up front so the compute phase performs no database access.
 
         Args:
             email: The :class:`~infrastructure.database.models.email.Email`
                 ORM entity to process.
+        """
+        has_tasks = await self._task_repo.email_has_tasks(email.id)
+        has_job = await self._job_repo.email_has_job_opportunity(email.id)
+        has_interview = await self._interview_repo.email_has_interview(email.id)
+
+        outcome = await self.compute(
+            email,
+            has_tasks=has_tasks,
+            has_job=has_job,
+            has_interview=has_interview,
+        )
+        await self.persist(email, outcome)
+
+    async def compute(
+        self,
+        email: Email,
+        *,
+        has_tasks: bool,
+        has_job: bool,
+        has_interview: bool,
+        precomputed_classification: ClassificationResult | None = None,
+        classification_duration: float | None = None,
+    ) -> EmailProcessingOutcome:
+        """Run all AI stages for one email **without touching the database**.
+
+        Stages run in dependency order: classification → priority → summary,
+        then task and career extraction concurrently (both depend only on the
+        summary/body). Synchronous, blocking AI/LLM calls are offloaded to
+        worker threads via :func:`asyncio.to_thread` so that ``compute`` calls
+        for different emails can overlap when scheduled concurrently.
+
+        In-memory attributes on ``email`` (classification, confidence,
+        priority, summary) are updated so dependent stages observe them; the
+        corresponding database writes happen later in :meth:`persist`.
+
+        Args:
+            email: The email entity to process.
+            has_tasks: Whether tasks already exist for this email.
+            has_job: Whether a job opportunity already exists for this email.
+            has_interview: Whether an interview already exists for this email.
+            precomputed_classification: Optional classification result supplied
+                by a batched classifier; when given, per-email classification
+                inference is skipped.
+            classification_duration: Optional per-email classification duration
+                attributed to a batched classification call, for instrumentation.
+
+        Returns:
+            An :class:`EmailProcessingOutcome` carrying the computed results and
+            per-stage timings.
         """
         logger.info(
             "email_processing_started",
@@ -141,25 +249,209 @@ class EmailProcessingService:
             },
         )
 
-        classification_result = await self._run_classification(email)
+        timings: dict[str, float] = {}
+
+        classification_result = precomputed_classification
+        if precomputed_classification is not None:
+            if classification_duration is not None:
+                timings["classification"] = classification_duration
+        elif email.classification is None:
+            with _stage_timer(timings, "classification"):
+                classification_result = await self._run_classification(email)
         if classification_result is not None:
-            await self._persist_classification(email, classification_result)
+            email.classification = classification_result.category
+            email.confidence_score = classification_result.confidence_score
 
-        priority_result = await self._run_priority_scoring(email)
+        priority_result: PriorityScoreResult | None = None
+        if email.priority_score is None:
+            with _stage_timer(timings, "priority"):
+                priority_result = await self._run_priority_scoring(email)
         if priority_result is not None:
-            await self._persist_priority_score(email, priority_result)
+            email.priority_score = priority_result.priority_score
 
-        summary_result = await self._run_summarization(email)
+        summary_result: EmailSummaryResult | None = None
+        if email.summary is None:
+            with _stage_timer(timings, "summarization"):
+                summary_result = await self._run_summarization(email)
         if summary_result is not None:
-            await self._persist_summary(email, summary_result)
+            email.summary = summary_result.summary
 
-        await self._run_task_extraction(email, summary_result)
-        await self._run_career_extraction(email, summary_result)
+        task_result, career_result = await asyncio.gather(
+            self._timed_task_extraction(email, summary_result, has_tasks, timings),
+            self._timed_career_extraction(
+                email, summary_result, has_job, has_interview, timings
+            ),
+        )
+
+        return EmailProcessingOutcome(
+            classification=classification_result,
+            priority=priority_result,
+            summary=summary_result,
+            task_result=task_result,
+            career_result=career_result,
+            skip_tasks=has_tasks,
+            skip_job=has_job,
+            skip_interview=has_interview,
+            timings=timings,
+        )
+
+    async def persist(self, email: Email, outcome: EmailProcessingOutcome) -> float:
+        """Persist a computed :class:`EmailProcessingOutcome` to the database.
+
+        Writes must be serialized by the caller because the shared
+        :class:`AsyncSession` is not safe for concurrent use. The AI scalar
+        fields (classification, confidence, priority, summary) are written in a
+        single update to minimise round trips.
+
+        Args:
+            email: The email entity whose results are being persisted.
+            outcome: The computed results from :meth:`compute`.
+
+        Returns:
+            The wall-clock database persistence duration in seconds.
+        """
+        start = perf_counter()
+
+        await self._email_repo.update_ai_fields(
+            email,
+            classification=(
+                outcome.classification.category
+                if outcome.classification is not None
+                else _UNSET
+            ),
+            confidence_score=(
+                outcome.classification.confidence_score
+                if outcome.classification is not None
+                else _UNSET
+            ),
+            priority_score=(
+                outcome.priority.priority_score
+                if outcome.priority is not None
+                else _UNSET
+            ),
+            summary=(
+                outcome.summary.summary if outcome.summary is not None else _UNSET
+            ),
+        )
+
+        if outcome.task_result is not None and outcome.task_result.tasks:
+            await self._persist_tasks(email.id, outcome.task_result)
+
+        if outcome.career_result is not None:
+            if not outcome.skip_job and outcome.career_result.job_opportunities:
+                await self._persist_job_opportunities(email.id, outcome.career_result)
+            if not outcome.skip_interview and outcome.career_result.interviews:
+                await self._persist_interviews(email.id, outcome.career_result)
+
+        duration = perf_counter() - start
+        outcome.timings["db_persist"] = duration
 
         logger.info(
             "email_processing_completed",
-            extra={"email_id": str(email.id)},
+            extra={
+                "email_id": str(email.id),
+                "timings_seconds": {
+                    stage: round(value, 4)
+                    for stage, value in outcome.timings.items()
+                },
+            },
         )
+        return duration
+
+    def classify_batch(
+        self,
+        emails: list[Email],
+    ) -> list[ClassificationResult | None]:
+        """Classify many emails in a single batched zero-shot inference call.
+
+        This is a synchronous, CPU-bound operation (it runs the local zero-shot
+        model) and should be offloaded to a worker thread by the caller. Emails
+        that are already classified, or that produce no usable classification
+        text, yield ``None`` at their matching index so the result aligns 1:1
+        with ``emails``.
+
+        Args:
+            emails: The email entities to classify.
+
+        Returns:
+            A list aligned with ``emails`` of classification results (or
+            ``None`` when skipped or on failure).
+        """
+        results: list[ClassificationResult | None] = [None] * len(emails)
+
+        inputs: list[EmailClassificationInput] = []
+        positions: list[int] = []
+        for index, email in enumerate(emails):
+            if email.classification is not None:
+                continue
+            try:
+                inputs.append(
+                    EmailClassificationInput(
+                        gmail_message_id=email.gmail_message_id,
+                        subject=email.subject,
+                        body_text=email.body_text,
+                        snippet=email.snippet,
+                        sender_email=email.sender_email,
+                    )
+                )
+                positions.append(index)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "classification_skipped_invalid_input",
+                    extra={"email_id": str(email.id), "reason": str(exc)},
+                )
+
+        if not inputs:
+            return results
+
+        try:
+            batch_results = self._classification_service.classify_batch(inputs)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "classification_batch_failed",
+                extra={"error": str(exc), "batch_size": len(inputs)},
+                exc_info=True,
+            )
+            return results
+
+        for position, result in zip(positions, batch_results):
+            results[position] = result
+        return results
+
+    async def _timed_task_extraction(
+        self,
+        email: Email,
+        summary_result: EmailSummaryResult | None,
+        has_tasks: bool,
+        timings: dict[str, float],
+    ) -> TaskExtractionResult | None:
+        """Run task extraction under a stage timer (concurrency-friendly wrapper)."""
+        if has_tasks:
+            logger.debug(
+                "task_extraction_skipped_tasks_exist",
+                extra={"email_id": str(email.id)},
+            )
+            return None
+        with _stage_timer(timings, "task_extraction"):
+            return await self._compute_task_extraction(email, summary_result)
+
+    async def _timed_career_extraction(
+        self,
+        email: Email,
+        summary_result: EmailSummaryResult | None,
+        has_job: bool,
+        has_interview: bool,
+        timings: dict[str, float],
+    ) -> CareerExtractionResult | None:
+        """Run career extraction under a stage timer (concurrency-friendly wrapper)."""
+        if has_job and has_interview:
+            logger.debug(
+                "career_extraction_skipped_records_exist",
+                extra={"email_id": str(email.id)},
+            )
+            return None
+        with _stage_timer(timings, "career_extraction"):
+            return await self._compute_career_extraction(email, summary_result)
 
     # ------------------------------------------------------------------
     # Stage 1 — Classification
@@ -194,7 +486,9 @@ class EmailProcessingService:
                 snippet=email.snippet,
                 sender_email=email.sender_email,
             )
-            result = self._classification_service.classify(input_data)
+            result = await asyncio.to_thread(
+                self._classification_service.classify, input_data
+            )
             logger.info(
                 "classification_succeeded",
                 extra={
@@ -217,33 +511,6 @@ class EmailProcessingService:
                 exc_info=True,
             )
             return None
-
-    async def _persist_classification(
-        self,
-        email: Email,
-        result: ClassificationResult,
-    ) -> None:
-        """Persist classification and confidence score to the email record.
-
-        Mutates ``email.classification`` and ``email.confidence_score`` so
-        that subsequent stages within the same processing call see the
-        updated values without requiring a database reload.
-
-        Args:
-            email: The email entity to update.
-            result: The classification result to persist.
-        """
-        await self._email_repo.update_classification(
-            email.gmail_message_id,
-            result.category,
-            result.confidence_score,
-        )
-        email.classification = result.category
-        email.confidence_score = result.confidence_score
-        logger.debug(
-            "classification_persisted",
-            extra={"email_id": str(email.id), "category": result.category},
-        )
 
     # ------------------------------------------------------------------
     # Stage 2 — Priority Scoring
@@ -273,7 +540,7 @@ class EmailProcessingService:
             return None
 
         try:
-            result = self._priority_service.score(email)
+            result = await asyncio.to_thread(self._priority_service.score, email)
             logger.info(
                 "priority_scoring_succeeded",
                 extra={
@@ -289,30 +556,6 @@ class EmailProcessingService:
                 exc_info=True,
             )
             return None
-
-    async def _persist_priority_score(
-        self,
-        email: Email,
-        result: PriorityScoreResult,
-    ) -> None:
-        """Persist the computed priority score to the email record.
-
-        Mutates ``email.priority_score`` so subsequent in-process reads
-        reflect the updated value.
-
-        Args:
-            email: The email entity to update.
-            result: The priority score result to persist.
-        """
-        await self._email_repo.update_priority_score(
-            email.gmail_message_id,
-            result.priority_score,
-        )
-        email.priority_score = result.priority_score
-        logger.debug(
-            "priority_score_persisted",
-            extra={"email_id": str(email.id), "score": result.priority_score},
-        )
 
     # ------------------------------------------------------------------
     # Stage 3 — Summarization
@@ -346,7 +589,9 @@ class EmailProcessingService:
                 body=email.body_text,
                 received_at=email.received_at,
             )
-            result = self._summarization_service.summarize(request)
+            result = await asyncio.to_thread(
+                self._summarization_service.summarize, request
+            )
             logger.info(
                 "summarization_succeeded",
                 extra={"email_id": str(email.id)},
@@ -370,73 +615,34 @@ class EmailProcessingService:
             )
             return None
 
-    async def _persist_summary(
-        self,
-        email: Email,
-        result: EmailSummaryResult,
-    ) -> None:
-
-        logger.info(
-            "persist_summary_started",
-            extra={
-                "email_id": str(email.id),
-                "gmail_message_id": email.gmail_message_id,
-            },
-        )
-
-        await self._email_repo.update_summary(
-            email.gmail_message_id,
-            result.summary,
-        )
-
-        logger.info(
-            "persist_summary_db_update_completed",
-            extra={
-                "email_id": str(email.id),
-            },
-        )
-
-        email.summary = result.summary
-
-        logger.info(
-            "summary_persisted",
-            extra={
-                "email_id": str(email.id),
-            },
-        )
-
     # ------------------------------------------------------------------
     # Stage 4 — Task Extraction
     # ------------------------------------------------------------------
 
-    async def _run_task_extraction(
+    async def _compute_task_extraction(
         self,
         email: Email,
         summary_result: EmailSummaryResult | None,
-    ) -> None:
-        """Extract and persist tasks from the email.
+    ) -> TaskExtractionResult | None:
+        """Extract tasks from the email **without** persisting them.
 
         Uses the generated summary as the primary description context when
-        available; falls back to the raw email body otherwise.
+        available; falls back to the raw email body otherwise. The blocking
+        LLM call is offloaded to a worker thread so it can overlap with career
+        extraction (and with other emails' compute calls).
 
-        Skips extraction when tasks already exist for the email to prevent
-        duplicate records across retries.
-
-        Failures are logged as warnings and do not abort the pipeline.
+        Failures are logged as warnings and yield ``None`` so the pipeline
+        continues.
 
         Args:
             email: The email entity to extract tasks from.
             summary_result: The summary produced in stage 3, or ``None``.
+
+        Returns:
+            A :class:`TaskExtractionResult` to be persisted later, or ``None``
+            when extraction fails.
         """
         try:
-            already_has_tasks = await self._task_repo.email_has_tasks(email.id)
-            if already_has_tasks:
-                logger.debug(
-                    "task_extraction_skipped_tasks_exist",
-                    extra={"email_id": str(email.id)},
-                )
-                return
-
             description = (
                 summary_result.summary
                 if summary_result is not None
@@ -450,39 +656,34 @@ class EmailProcessingService:
                 source_company=None,
             )
 
-            result: TaskExtractionResult = (
-                self._task_extraction_service.extract_tasks(
-                    request,
-                    source_title=email.subject,
-                )
+            result: TaskExtractionResult = await asyncio.to_thread(
+                self._task_extraction_service.extract_tasks,
+                request,
+                source_title=email.subject,
             )
 
-            if result.tasks:
-                await self._persist_tasks(email.id, result)
-                logger.info(
-                    "task_extraction_succeeded",
-                    extra={
-                        "email_id": str(email.id),
-                        "task_count": result.extracted_task_count,
-                    },
-                )
-            else:
-                logger.debug(
-                    "task_extraction_no_tasks_found",
-                    extra={"email_id": str(email.id)},
-                )
+            logger.info(
+                "task_extraction_succeeded",
+                extra={
+                    "email_id": str(email.id),
+                    "task_count": result.extracted_task_count,
+                },
+            )
+            return result
 
         except TaskExtractionFailureError as exc:
             logger.warning(
                 "task_extraction_failed",
                 extra={"email_id": str(email.id), "error": str(exc)},
             )
+            return None
         except Exception as exc:
             logger.warning(
                 "task_extraction_failed_unexpected",
                 extra={"email_id": str(email.id), "error": str(exc)},
                 exc_info=True,
             )
+            return None
 
     async def _persist_tasks(
         self,
@@ -515,33 +716,28 @@ class EmailProcessingService:
     # Stage 5 — Career Extraction
     # ------------------------------------------------------------------
 
-    async def _run_career_extraction(
+    async def _compute_career_extraction(
         self,
         email: Email,
         summary_result: EmailSummaryResult | None,
-    ) -> None:
-        """Extract and persist job opportunities and interviews from the email.
+    ) -> CareerExtractionResult | None:
+        """Extract job opportunities and interviews **without** persisting them.
 
-        Skips whichever sub-type (jobs or interviews) already has records
-        for this email to prevent duplicates across retries.
+        The blocking LLM call is offloaded to a worker thread so it can overlap
+        with task extraction (and with other emails' compute calls).
 
-        Failures are logged as warnings and do not abort the pipeline.
+        Failures are logged as warnings and yield ``None`` so the pipeline
+        continues.
 
         Args:
             email: The email entity to extract career data from.
             summary_result: The summary produced in stage 3, or ``None``.
+
+        Returns:
+            A :class:`CareerExtractionResult` to be persisted later, or ``None``
+            when extraction fails.
         """
         try:
-            has_job = await self._job_repo.email_has_job_opportunity(email.id)
-            has_interview = await self._interview_repo.email_has_interview(email.id)
-
-            if has_job and has_interview:
-                logger.debug(
-                    "career_extraction_skipped_records_exist",
-                    extra={"email_id": str(email.id)},
-                )
-                return
-
             # Career extraction requires the raw email content to extract
             # structured fields (company, role, apply_link, salary, location).
             # Summaries collapse job alert emails to one-liners that lose all
@@ -561,15 +757,9 @@ class EmailProcessingService:
                 body=body_context,
             )
 
-            result: CareerExtractionResult = (
-                self._career_extraction_service.extract_career(request)
+            result: CareerExtractionResult = await asyncio.to_thread(
+                self._career_extraction_service.extract_career, request
             )
-
-            if not has_job and result.job_opportunities:
-                await self._persist_job_opportunities(email.id, result)
-
-            if not has_interview and result.interviews:
-                await self._persist_interviews(email.id, result)
 
             logger.info(
                 "career_extraction_succeeded",
@@ -579,18 +769,21 @@ class EmailProcessingService:
                     "interviews": len(result.interviews),
                 },
             )
+            return result
 
         except CareerExtractionFailureError as exc:
             logger.warning(
                 "career_extraction_failed",
                 extra={"email_id": str(email.id), "error": str(exc)},
             )
+            return None
         except Exception as exc:
             logger.warning(
                 "career_extraction_failed_unexpected",
                 extra={"email_id": str(email.id), "error": str(exc)},
                 exc_info=True,
             )
+            return None
 
     async def _persist_job_opportunities(
         self,

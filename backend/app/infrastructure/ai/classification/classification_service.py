@@ -12,19 +12,17 @@ from infrastructure.ai.classification.schemas import (
     EmailClassificationInput,
 )
 from infrastructure.ai.classification.zero_shot_classifier import ZeroShotClassifier
-from infrastructure.ai.embeddings.embedding_service import EmbeddingService
 
 logger = logging.getLogger(__name__)
 
 
 class ClassificationService:
-    """Coordinate embedding generation, zero-shot classification, and threshold evaluation.
+    """Coordinate zero-shot classification and confidence-threshold evaluation.
 
-    The service executes the phase-5 classification pipeline in order:
+    The service executes the classification pipeline in order:
 
-    1. Generate an embedding for the email text.
-    2. Run zero-shot classification.
-    3. Apply the configured confidence threshold and fallback to ``Other``
+    1. Run zero-shot classification (single email or batched).
+    2. Apply the configured confidence threshold and fall back to ``Other``
        when the score is below the threshold.
 
     The resulting category and confidence score are returned in a
@@ -34,21 +32,18 @@ class ClassificationService:
     def __init__(
         self,
         *,
-        embedding_service: EmbeddingService | None = None,
         zero_shot_classifier: ZeroShotClassifier | None = None,
         confidence_threshold: float | None = None,
     ) -> None:
         """Initialise the classification service.
 
         Args:
-            embedding_service: Optional embedding service dependency override.
             zero_shot_classifier: Optional zero-shot classifier dependency override.
             confidence_threshold: Minimum confidence required to keep the
                 classifier's predicted category. When omitted, the configured
                 application threshold is used.
         """
         settings = get_settings()
-        self._embedding_service = embedding_service or EmbeddingService()
         self._zero_shot_classifier = zero_shot_classifier or ZeroShotClassifier(
             confidence_threshold=0.0  # threshold enforced below; classifier returns all scores
         )
@@ -78,12 +73,65 @@ class ClassificationService:
                 f"'{input_data.gmail_message_id}' for classification."
             )
 
-        self._embedding_service.embed_text(text)
         classification_result = self._zero_shot_classifier.classify(input_data)
+        return self._apply_threshold(classification_result)
 
-        print("RESULT TYPE:", type(classification_result))
-        print("RESULT:", classification_result)
+    def classify_batch(
+        self,
+        inputs: list[EmailClassificationInput],
+    ) -> list[ClassificationResult | None]:
+        """Classify many emails in a single batched zero-shot inference call.
 
+        Produces results equivalent to calling :meth:`classify` per email — the
+        same model, hypothesis template, and confidence-threshold override are
+        applied — but issues one batched model call instead of one call per
+        email. Inputs without usable text yield ``None`` at the matching index,
+        mirroring the :class:`ClassificationInputError` path of :meth:`classify`.
+
+        Args:
+            inputs: Validated classification inputs, one per email.
+
+        Returns:
+            A list aligned with ``inputs`` where each element is a
+            :class:`ClassificationResult` or ``None`` when the email had no
+            usable text.
+        """
+        results: list[ClassificationResult | None] = [None] * len(inputs)
+
+        classifiable: list[EmailClassificationInput] = []
+        positions: list[int] = []
+        for index, input_data in enumerate(inputs):
+            if input_data.build_classification_text():
+                classifiable.append(input_data)
+                positions.append(index)
+            else:
+                logger.warning(
+                    "classification_skipped_no_usable_text",
+                    extra={"gmail_message_id": input_data.gmail_message_id},
+                )
+
+        if not classifiable:
+            return results
+
+        raw_results = self._zero_shot_classifier.classify_many(classifiable)
+        for position, raw_result in zip(positions, raw_results):
+            results[position] = self._apply_threshold(raw_result)
+
+        return results
+
+    def _apply_threshold(
+        self,
+        classification_result: ClassificationResult,
+    ) -> ClassificationResult:
+        """Apply the configured confidence threshold to a raw classifier result.
+
+        Args:
+            classification_result: The raw result from the zero-shot classifier.
+
+        Returns:
+            The original result, or an ``Other`` fallback result when the
+            confidence score is below the configured threshold.
+        """
         if classification_result.confidence_score < self._confidence_threshold:
             logger.warning(
                 "classification_below_threshold",

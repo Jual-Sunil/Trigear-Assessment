@@ -108,13 +108,8 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
     async with factory() as session:
         try:
             yield session
-
-            print("COMMITTING DATABASE TRANSACTION")
             await session.commit()
-            print("DATABASE COMMIT COMPLETE")
-
         except Exception:
-            print("ROLLING BACK DATABASE TRANSACTION")
             await session.rollback()
             raise
 

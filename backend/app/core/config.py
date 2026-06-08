@@ -89,6 +89,35 @@ class Settings(BaseSettings):
     gmail_sync_batch_size: int = Field(default=50)
 
     # -------------------------------------------------------------------------
+    # Email Processing Concurrency
+    # -------------------------------------------------------------------------
+    email_processing_concurrency: int = Field(
+        default=8,
+        ge=1,
+        le=50,
+        description=(
+            "Maximum number of emails whose AI pipeline runs concurrently during "
+            "a sync. Bounds simultaneous LLM/API requests via an asyncio.Semaphore."
+        ),
+    )
+    gmail_fetch_concurrency: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description=(
+            "Maximum number of Gmail message bodies fetched concurrently during a "
+            "sync."
+        ),
+    )
+    classification_batch_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, classify all newly synced emails in a single batched "
+            "zero-shot inference call instead of one call per email."
+        ),
+    )
+
+    # -------------------------------------------------------------------------
     # AI / HuggingFace
     # -------------------------------------------------------------------------
     huggingface_cache_dir: str = Field(default="/tmp/hf_cache")
