@@ -1,25 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
-import { Alert, Box } from "@mui/material";
+import { motion } from "framer-motion";
+import { AlertCircle } from "lucide-react";
 import { fetchEmailById } from "../../services/api/emailApi";
 import type { EmailDetail } from "../../services/api/types";
 import { EmailHeader } from "../../components/emails/EmailHeader";
 import { EmailSummaryCard } from "../../components/emails/EmailSummaryCard";
 import { EmailBodyViewer } from "../../components/emails/EmailBodyViewer";
 
-/**
- * Email detail page.
- *
- * Fetches a single email by UUID via GET /emails/{id} using TanStack Query
- * and composes the view from three focused child components:
- *
- * - EmailHeader:      subject, sender, received date, back navigation.
- * - EmailSummaryCard: AI metadata — classification, confidence, priority,
- *                     action-required flag, and AI summary.
- * - EmailBodyViewer:  sandboxed HTML render or plain-text fallback.
- *
- * Owns data-fetching, loading state, and error state only.
- */
 export function Component() {
   const { id } = useParams<{ id: string }>();
 
@@ -30,22 +18,29 @@ export function Component() {
   });
 
   return (
-    <Box>
-      <EmailHeader email={data} isLoading={isLoading} />
+    <div className="min-h-screen bg-[#0a0a0b] text-white">
+      <div className="max-w-[820px] mx-auto px-4 py-8 md:px-8 md:py-10">
+        <EmailHeader email={data} isLoading={isLoading} />
 
-      {isError && (
-        <Alert severity="error" sx={{ mb: 3 }}>
-          Failed to load email. It may not exist or you may not have access.
-        </Alert>
-      )}
+        {isError && (
+          <motion.div
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex items-center gap-2.5 rounded-xl border border-rose-500/20 bg-rose-500/5 px-4 py-3 text-sm text-rose-400 mb-4"
+          >
+            <AlertCircle size={15} />
+            Failed to load email. It may not exist or you may not have access.
+          </motion.div>
+        )}
 
-      {!isError && (
-        <>
-          <EmailSummaryCard email={data} isLoading={isLoading} />
-          <EmailBodyViewer email={data} isLoading={isLoading} />
-        </>
-      )}
-    </Box>
+        {!isError && (
+          <>
+            <EmailSummaryCard email={data} isLoading={isLoading} />
+            <EmailBodyViewer email={data} isLoading={isLoading} />
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 

@@ -1,32 +1,21 @@
+import { motion } from "framer-motion";
 import {
-  Box,
-  Button,
-  Card,
-  CardContent,
-  Chip,
-  Divider,
-  Tooltip,
-  Typography,
-} from "@mui/material";
-import BusinessIcon from "@mui/icons-material/Business";
-import WorkOutlineOutlinedIcon from "@mui/icons-material/WorkOutlineOutlined";
-import LocationOnIcon from "@mui/icons-material/LocationOn";
-import AttachMoneyIcon from "@mui/icons-material/AttachMoney";
-import CalendarTodayIcon from "@mui/icons-material/CalendarToday";
-import OpenInNewIcon from "@mui/icons-material/OpenInNew";
+  Building2,
+  MapPin,
+  DollarSign,
+  Calendar,
+  ExternalLink,
+  Briefcase,
+  AlertCircle,
+} from "lucide-react";
 import type { JobOpportunity } from "../../services/api/types";
+import { cn } from "../../lib/utils";
 
 export interface JobCardProps {
-  /** Job opportunity record to render. */
   job: JobOpportunity;
+  index?: number;
 }
 
-/**
- * Formats an ISO date string to a short locale date.
- *
- * @param iso - ISO 8601 date string, or null.
- * @returns Formatted date string, or "—" when the value is absent.
- */
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleDateString(undefined, {
@@ -36,151 +25,168 @@ function formatDate(iso: string | null): string {
   });
 }
 
-/**
- * Returns true when an ISO deadline string represents a date in the past.
- *
- * @param iso - ISO 8601 date string, or null.
- */
 function isPastDeadline(iso: string | null): boolean {
   if (!iso) return false;
   return new Date(iso) < new Date();
 }
 
-/**
- * Renders a single job opportunity as a compact MUI Card.
- *
- * Displays company, role, location, salary, deadline, and an apply link.
- * Cards whose deadline has already passed receive an error-coloured
- * calendar label to signal urgency. The apply button opens the link in
- * a new tab with `rel="noopener noreferrer"`.
- */
-export function JobCard({ job }: JobCardProps) {
+function daysUntil(iso: string | null): number | null {
+  if (!iso) return null;
+  const diff = new Date(iso).getTime() - Date.now();
+  return Math.ceil(diff / (1000 * 60 * 60 * 24));
+}
+
+function DeadlineBadge({ deadline }: { deadline: string | null }) {
+  if (!deadline) return null;
+  const expired = isPastDeadline(deadline);
+  const days = daysUntil(deadline);
+  const urgent = !expired && days !== null && days <= 7;
+
+  if (expired) {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full ring-1 ring-inset bg-zinc-800/60 text-zinc-600 ring-zinc-700/40">
+        Expired
+      </span>
+    );
+  }
+
+  if (urgent) {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full ring-1 ring-inset bg-amber-500/10 text-amber-400 ring-amber-500/20">
+        <AlertCircle size={8} />
+        {days}d left
+      </span>
+    );
+  }
+
+  return null;
+}
+
+function CompanyInitial({ company }: { company: string | null }) {
+  const letter = company ? company.trim()[0].toUpperCase() : "?";
+  return (
+    <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-white/[0.05] border border-white/[0.08] flex items-center justify-center">
+      <span className="text-[14px] font-bold text-zinc-400">{letter}</span>
+    </div>
+  );
+}
+
+export function JobCard({ job, index = 0 }: JobCardProps) {
   const expired = isPastDeadline(job.deadline);
+  const days = daysUntil(job.deadline);
+  const urgent = !expired && days !== null && days <= 7;
 
   return (
-    <Card
-      variant="outlined"
-      sx={{
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        transition: "box-shadow 0.2s ease, transform 0.2s ease",
-        "&:hover": {
-          boxShadow: "0 4px 16px rgba(0,0,0,0.08)",
-          transform: "translateY(-2px)",
-        },
-      }}
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0, transition: { duration: 0.22, delay: index * 0.05 } }}
+      whileHover={!expired ? { y: -2, transition: { duration: 0.15 } } : undefined}
+      className={cn(
+        "group relative flex flex-col rounded-xl border overflow-hidden transition-shadow duration-200",
+        expired
+          ? "border-white/[0.04] bg-white/[0.01] opacity-50"
+          : urgent
+          ? "border-amber-500/20 bg-amber-500/[0.02] hover:shadow-[0_4px_24px_rgba(0,0,0,0.5)]"
+          : "border-white/[0.07] bg-white/[0.02] hover:border-white/[0.12] hover:shadow-[0_4px_24px_rgba(0,0,0,0.5)]"
+      )}
     >
-      <CardContent sx={{ p: 2, "&:last-child": { pb: 2 }, flex: 1, display: "flex", flexDirection: "column" }}>
-        {/* Company + role */}
-        <Box sx={{ mb: 1.25 }}>
-          <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, mb: 0.5 }}>
-            <BusinessIcon sx={{ fontSize: "0.875rem", color: "text.disabled" }} />
-            <Typography
-              variant="body2"
-              color="text.secondary"
-              sx={{ fontSize: "0.775rem", fontWeight: 500 }}
+      {/* Top accent stripe for urgent */}
+      {urgent && (
+        <span className="absolute top-0 left-0 right-0 h-[2px] bg-amber-400/60 rounded-t-xl" />
+      )}
+
+      <div className="flex flex-col flex-1 p-4 gap-3">
+        {/* Company + role header */}
+        <div className="flex items-start gap-2.5">
+          <CompanyInitial company={job.company} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+              <span className="text-[11px] font-medium text-zinc-500 truncate">
+                {job.company ?? "Unknown Company"}
+              </span>
+              <DeadlineBadge deadline={job.deadline} />
+            </div>
+            <h3
+              className={cn(
+                "text-[13.5px] font-semibold leading-snug",
+                expired ? "text-zinc-600" : "text-zinc-100"
+              )}
+              title={job.role ?? ""}
             >
-              {job.company ?? "—"}
-            </Typography>
-          </Box>
+              {job.role ?? "Untitled Role"}
+            </h3>
+          </div>
+        </div>
 
-          <Tooltip
-            title={job.role ?? ""}
-            placement="top-start"
-            enterDelay={600}
-            disableHoverListener={!job.role || job.role.length <= 50}
-          >
-            <Box sx={{ display: "flex", alignItems: "flex-start", gap: 0.75 }}>
-              <WorkOutlineOutlinedIcon
-                sx={{ fontSize: "0.875rem", color: "primary.main", mt: "2px", flexShrink: 0 }}
-              />
-              <Typography
-                variant="body2"
-                sx={{
-                  fontWeight: 700,
-                  fontSize: "0.9375rem",
-                  lineHeight: 1.3,
-                  overflow: "hidden",
-                  display: "-webkit-box",
-                  WebkitLineClamp: 2,
-                  WebkitBoxOrient: "vertical",
-                }}
-              >
-                {job.role ?? "—"}
-              </Typography>
-            </Box>
-          </Tooltip>
-        </Box>
+        {/* Divider */}
+        <div className="border-t border-white/[0.05]" />
 
-        <Divider sx={{ my: 1 }} />
-
-        {/* Location + salary */}
-        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mb: 1.25 }}>
+        {/* Meta row */}
+        <div className="flex flex-col gap-1.5">
           {job.location && (
-            <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-              <LocationOnIcon sx={{ fontSize: "0.8rem", color: "text.disabled" }} />
-              <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.75rem" }}>
-                {job.location}
-              </Typography>
-            </Box>
+            <div className="flex items-center gap-1.5">
+              <MapPin size={11} className="text-zinc-700 flex-shrink-0" />
+              <span className="text-[11.5px] text-zinc-500 truncate">{job.location}</span>
+            </div>
           )}
 
           {job.salary && (
-            <Chip
-              icon={<AttachMoneyIcon sx={{ fontSize: "0.8rem !important" }} />}
-              label={job.salary}
-              size="small"
-              variant="outlined"
-              color="success"
-              sx={{ fontSize: "0.7rem", height: 20 }}
-            />
+            <div className="flex items-center gap-1.5">
+              <DollarSign size={11} className="text-zinc-700 flex-shrink-0" />
+              <span className="text-[11.5px] text-zinc-500 truncate">{job.salary}</span>
+            </div>
           )}
-        </Box>
 
-        {/* Deadline */}
-        <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1.5, mt: "auto" }}>
-          <CalendarTodayIcon
-            sx={{
-              fontSize: "0.8rem",
-              color: expired ? "error.main" : "text.disabled",
-            }}
-          />
-          <Typography
-            variant="caption"
-            sx={{
-              fontSize: "0.75rem",
-              color: expired ? "error.main" : "text.secondary",
-              fontWeight: expired ? 600 : 400,
-            }}
-          >
-            {expired ? "Expired · " : "Deadline · "}
-            {formatDate(job.deadline)}
-          </Typography>
-        </Box>
+          <div className="flex items-center gap-1.5">
+            <Calendar
+              size={11}
+              className={cn(
+                "flex-shrink-0",
+                expired ? "text-zinc-700" : urgent ? "text-amber-500" : "text-zinc-700"
+              )}
+            />
+            <span
+              className={cn(
+                "text-[11.5px] tabular-nums",
+                expired
+                  ? "text-zinc-700"
+                  : urgent
+                  ? "text-amber-400 font-semibold"
+                  : "text-zinc-500"
+              )}
+            >
+              {expired ? "Expired · " : "Deadline · "}
+              {formatDate(job.deadline)}
+            </span>
+          </div>
+        </div>
 
-        {/* Apply button */}
-        {job.apply_link ? (
-          <Button
-            size="small"
-            variant="contained"
-            disableElevation
-            endIcon={<OpenInNewIcon fontSize="inherit" />}
-            href={job.apply_link}
-            target="_blank"
-            rel="noopener noreferrer"
-            disabled={expired}
-            sx={{ textTransform: "none", fontWeight: 600, alignSelf: "flex-start" }}
-          >
-            Apply Now
-          </Button>
-        ) : (
-          <Typography variant="caption" color="text.disabled">
-            No apply link
-          </Typography>
-        )}
-      </CardContent>
-    </Card>
+        {/* Apply button pushed to bottom */}
+        <div className="mt-auto pt-1">
+          {job.apply_link ? (
+            <a
+              href={job.apply_link}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => expired && e.preventDefault()}
+              className={cn(
+                "inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-all duration-150",
+                expired
+                  ? "pointer-events-none bg-white/[0.03] text-zinc-700 cursor-not-allowed"
+                  : "bg-white/[0.07] text-zinc-200 hover:bg-white/[0.12] hover:text-white focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20"
+              )}
+              aria-disabled={expired}
+            >
+              <Briefcase size={11} />
+              Apply Now
+              <ExternalLink size={10} className="opacity-60" />
+            </a>
+          ) : (
+            <span className="text-[11px] text-zinc-700 italic">No apply link</span>
+          )}
+        </div>
+      </div>
+    </motion.div>
   );
 }
 

@@ -1,91 +1,59 @@
-import { Alert, Grid } from "@mui/material";
-import EmailIcon from "@mui/icons-material/Email";
-import StarIcon from "@mui/icons-material/Star";
-import TaskAltIcon from "@mui/icons-material/TaskAlt";
-import CalendarTodayIcon from "@mui/icons-material/CalendarToday";
-import WorkIcon from "@mui/icons-material/Work";
-import { useTheme } from "@mui/material/styles";
+import { Mail, Star, CheckSquare, CalendarDays, Briefcase } from "lucide-react";
+import { motion } from "framer-motion";
 import { StatCard } from "./StatCard";
 import type { DashboardResponse } from "../../services/api/types";
 
 export interface StatsCardsProps {
-  /** Aggregated dashboard counts from the API; undefined while loading. */
   data: DashboardResponse | undefined;
-  /** When true, all cards render skeleton placeholders. */
   isLoading: boolean;
-  /** When true, renders an error alert above the card grid. */
   isError: boolean;
 }
 
-/**
- * Renders the full responsive grid of dashboard stat cards.
- *
- * Displays five metric cards for total emails, important emails,
- * pending tasks, upcoming interviews, and active job opportunities.
- * Each card receives a distinct MUI theme-colour accent stripe.
- *
- * Propagates isLoading and isError states to child StatCard instances
- * and surfaces a user-facing error alert when isError is true.
- */
-export function StatsCards({ data, isLoading, isError }: StatsCardsProps) {
-  const theme = useTheme();
+const STAT_CONFIGS = [
+  { key: "total_emails" as const, label: "Total Emails", icon: <Mail size={15} />, accentColor: "#6366f1" },
+  { key: "important_emails" as const, label: "Important", icon: <Star size={15} />, accentColor: "#f59e0b" },
+  { key: "pending_tasks" as const, label: "Pending Tasks", icon: <CheckSquare size={15} />, accentColor: "#10b981" },
+  { key: "upcoming_interviews" as const, label: "Interviews", icon: <CalendarDays size={15} />, accentColor: "#38bdf8" },
+  { key: "active_jobs" as const, label: "Active Jobs", icon: <Briefcase size={15} />, accentColor: "#a78bfa" },
+];
 
-  const stats = [
-    {
-      label: "Total Emails",
-      value: data?.total_emails,
-      icon: <EmailIcon fontSize="small" color="primary" />,
-      accentColor: theme.palette.primary.main,
-    },
-    {
-      label: "Important Emails",
-      value: data?.important_emails,
-      icon: <StarIcon fontSize="small" color="warning" />,
-      accentColor: theme.palette.warning.main,
-    },
-    {
-      label: "Pending Tasks",
-      value: data?.pending_tasks,
-      icon: <TaskAltIcon fontSize="small" color="success" />,
-      accentColor: theme.palette.success.main,
-    },
-    {
-      label: "Upcoming Interviews",
-      value: data?.upcoming_interviews,
-      icon: <CalendarTodayIcon fontSize="small" color="info" />,
-      accentColor: theme.palette.info.main,
-    },
-    {
-      label: "Active Jobs",
-      value: data?.active_jobs,
-      icon: <WorkIcon fontSize="small" color="secondary" />,
-      accentColor: theme.palette.secondary.main,
-    },
-  ] as const;
+const containerVariants = {
+  hidden: {},
+  visible: { transition: { staggerChildren: 0.07 } },
+};
+
+const itemVariants = {
+  hidden: { opacity: 0, y: 10 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.3 } },
+};
+
+export function StatsCards({ data, isLoading, isError }: StatsCardsProps) {
+  if (isError) {
+    return (
+      <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 px-4 py-3 text-sm text-rose-400">
+        Failed to load dashboard metrics. Please refresh.
+      </div>
+    );
+  }
 
   return (
-    <>
-      {isError && (
-        <Alert severity="error" sx={{ mb: 3 }}>
-          Failed to load dashboard data. Please try again.
-        </Alert>
-      )}
-
-      <Grid container spacing={2}>
-        {stats.map((stat) => (
-          <Grid key={stat.label} size={{ xs: 12, sm: 6, md: 4, lg: 4 }}>
-            <StatCard
-              label={stat.label}
-              value={stat.value}
-              icon={stat.icon}
-              isLoading={isLoading}
-              accentColor={stat.accentColor}
-            />
-          </Grid>
-        ))}
-      </Grid>
-    </>
+    <motion.div
+      variants={containerVariants}
+      initial="hidden"
+      animate="visible"
+      className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 w-full"
+    >
+      {STAT_CONFIGS.map((config) => (
+        <motion.div key={config.key} variants={itemVariants}>
+          <StatCard
+            label={config.label}
+            value={data?.[config.key]}
+            icon={config.icon}
+            isLoading={isLoading}
+            accentColor={config.accentColor}
+          />
+        </motion.div>
+      ))}
+    </motion.div>
   );
 }
-
-export default StatsCards;

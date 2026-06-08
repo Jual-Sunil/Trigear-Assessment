@@ -1,65 +1,51 @@
-import { Chip } from "@mui/material";
-import type { ChipProps } from "@mui/material";
+import type { HTMLAttributes } from "react";
+import { cn } from "../../lib/utils";
 
 export interface EmailClassificationChipProps {
-  /** Classification label returned by the API, e.g. "Work", "Interview". */
   classification: string | null;
-  /** MUI Chip size. Defaults to "small". */
-  size?: ChipProps["size"];
+  size?: "xs" | "sm";
+  className?: string;
 }
 
-/**
- * Classification label → MUI colour mapping.
- * Covers all nine categories emitted by the classification service.
- */
-const CLASSIFICATION_COLOUR: Record<
-  string,
-  ChipProps["color"]
-> = {
-  Work: "primary",
-  Interview: "info",
-  "Job Opportunity": "success",
-  Finance: "warning",
-  Personal: "secondary",
-  Promotion: "default",
-  Newsletter: "default",
-  Spam: "error",
-  Other: "default",
+const STYLES: Record<string, string> = {
+  Work:              "bg-indigo-500/15 text-indigo-300 ring-indigo-500/20",
+  Interview:         "bg-sky-500/15 text-sky-300 ring-sky-500/20",
+  "Job Opportunity": "bg-emerald-500/15 text-emerald-300 ring-emerald-500/20",
+  Finance:           "bg-amber-500/15 text-amber-300 ring-amber-500/20",
+  Personal:          "bg-violet-500/15 text-violet-300 ring-violet-500/20",
+  Promotion:         "bg-zinc-500/15 text-zinc-400 ring-zinc-500/20",
+  Newsletter:        "bg-zinc-500/10 text-zinc-500 ring-zinc-500/10",
+  Spam:              "bg-rose-500/15 text-rose-400 ring-rose-500/20",
+  Other:             "bg-zinc-500/10 text-zinc-500 ring-zinc-500/10",
 };
 
-/**
- * Renders a compact MUI Chip for an email classification label.
- *
- * Maps each known category to a distinct MUI colour token so labels
- * are immediately scannable in list views. Unknown or null categories
- * render as a neutral "—" chip.
- */
 export function EmailClassificationChip({
   classification,
-  size = "small",
+  size = "sm",
+  className,
 }: EmailClassificationChipProps) {
+  const base =
+    "inline-flex items-center font-medium ring-1 ring-inset rounded-full select-none whitespace-nowrap";
+  const sizing = size === "xs"
+    ? "text-[10px] px-1.5 py-px leading-4"
+    : "text-[11px] px-2 py-0.5 leading-4";
+
   if (!classification) {
     return (
-      <Chip
-        label="—"
-        size={size}
-        color="default"
-        variant="outlined"
-        sx={{ fontSize: "0.7rem", height: 20 }}
-      />
+      <span
+        className={cn(base, sizing, "bg-zinc-800/60 text-zinc-600 ring-zinc-700/40", className)}
+      >
+        —
+      </span>
     );
   }
 
-  const color = CLASSIFICATION_COLOUR[classification] ?? "default";
+  const style = STYLES[classification] ?? "bg-zinc-500/10 text-zinc-400 ring-zinc-500/10";
 
   return (
-    <Chip
-      label={classification}
-      size={size}
-      color={color}
-      variant="filled"
-      sx={{ fontSize: "0.7rem", height: 20, fontWeight: 500 }}
-    />
+    <span className={cn(base, sizing, style, className)}>
+      {classification}
+    </span>
   );
 }
 
