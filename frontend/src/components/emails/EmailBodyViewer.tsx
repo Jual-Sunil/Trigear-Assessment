@@ -1,46 +1,23 @@
 import { useRef, useState, useCallback, useEffect } from "react";
-import {
-  Box,
-  Card,
-  CardContent,
-  CardHeader,
-  Divider,
-  Skeleton,
-  ToggleButton,
-  ToggleButtonGroup,
-  Typography,
-} from "@mui/material";
-import EmailIcon from "@mui/icons-material/Email";
+import { motion } from "framer-motion";
+import { Mail } from "lucide-react";
+import { cn } from "../../lib/utils";
 import type { EmailDetail } from "../../services/api/types";
 
 export interface EmailBodyViewerProps {
-  /** Full email record; undefined while loading. */
   email: EmailDetail | undefined;
-  /** When true, renders a skeleton placeholder instead of the body. */
   isLoading: boolean;
 }
 
 type ViewMode = "html" | "text";
 
-/**
- * Wraps raw email HTML in a minimal document shell with defensive styles.
- *
- * If the HTML already contains a full document declaration it is used as-is
- * so the email's own <head> styles and meta tags are preserved.
- * Otherwise the content is wrapped in a lightweight shell.
- *
- * @param html - Raw HTML string from the email body.
- * @returns A complete HTML document string safe for use as an iframe srcDoc.
- */
 function buildSrcDoc(html: string): string {
   const trimmed = html.trim();
   const isFullDocument =
     trimmed.toLowerCase().startsWith("<!doctype") ||
     trimmed.toLowerCase().startsWith("<html");
 
-  if (isFullDocument) {
-    return html;
-  }
+  if (isFullDocument) return html;
 
   return `<!DOCTYPE html>
 <html>
@@ -50,187 +27,138 @@ function buildSrcDoc(html: string): string {
     <style>
       body {
         margin: 0;
-        padding: 8px 12px;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        font-size: 14px;
-        line-height: 1.6;
-        color: #1a1a1a;
+        padding: 8px 4px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 13.5px;
+        line-height: 1.65;
+        color: #d4d4d8;
+        background: transparent;
         word-break: break-word;
         overflow-wrap: break-word;
       }
-      a { color: #1976d2; }
-      img { max-width: 100%; height: auto; }
+      a { color: #818cf8; }
+      img { max-width: 100%; height: auto; border-radius: 4px; }
       table { max-width: 100%; }
+      blockquote { border-left: 2px solid #3f3f46; padding-left: 12px; color: #71717a; margin: 8px 0; }
     </style>
   </head>
   <body>${html}</body>
 </html>`;
 }
 
-/**
- * Renders email HTML inside a sandboxed iframe using the srcDoc attribute.
- *
- * srcDoc is used instead of document.write() because the sandbox omits
- * allow-same-origin, making contentDocument inaccessible in most browsers
- * when the iframe has no src. srcDoc bypasses that restriction entirely
- * and is the correct API for injecting static HTML into a sandboxed iframe.
- *
- * The sandbox permits popups (external links open in a new tab) but blocks
- * script execution, form submission, top-level navigation, and all other
- * potentially dangerous capabilities.
- */
 function HtmlBodyFrame({ html }: { html: string }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeHeight, setIframeHeight] = useState(400);
   const srcDoc = buildSrcDoc(html);
 
-  const handleLoad = useCallback(() => {
+  const measure = useCallback(() => {
     const iframe = iframeRef.current;
     if (!iframe) return;
     try {
       const body = iframe.contentDocument?.body;
-      if (body) {
-        setIframeHeight(Math.max(body.scrollHeight + 24, 100));
-      }
-    } catch {
-      // Cross-origin access blocked — keep default height.
-    }
+      if (body) setIframeHeight(Math.max(body.scrollHeight + 24, 100));
+    } catch {}
   }, []);
 
-  // Re-measure after a short delay to catch images that load after the
-  // iframe's load event fires and increase the document scroll height.
   useEffect(() => {
-    const timer = setTimeout(() => {
-      const iframe = iframeRef.current;
-      if (!iframe) return;
-      try {
-        const body = iframe.contentDocument?.body;
-        if (body && body.scrollHeight > 0) {
-          setIframeHeight(body.scrollHeight + 24);
-        }
-      } catch {
-        // Silently ignore cross-origin access errors.
-      }
-    }, 300);
+    const timer = setTimeout(measure, 300);
     return () => clearTimeout(timer);
-  }, [html]);
+  }, [html, measure]);
 
   return (
-    <Box
-      component="iframe"
+    <iframe
       ref={iframeRef}
       srcDoc={srcDoc}
-      onLoad={handleLoad}
+      onLoad={measure}
       sandbox="allow-popups allow-popups-to-escape-sandbox"
       title="Email body"
-      sx={{
-        width: "100%",
-        height: iframeHeight,
-        border: "none",
-        display: "block",
-        transition: "height 0.15s ease",
-      }}
+      style={{ height: iframeHeight }}
+      className="w-full border-none block transition-[height] duration-200"
     />
   );
 }
 
-/**
- * Renders the plain-text email body as a preformatted block,
- * preserving whitespace and line breaks from the original message.
- */
 function TextBody({ text }: { text: string }) {
   return (
-    <Box
-      component="pre"
-      sx={{
-        m: 0,
-        fontFamily: "inherit",
-        fontSize: "0.875rem",
-        lineHeight: 1.65,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        color: "text.primary",
-      }}
-    >
+    <pre className="m-0 font-[inherit] text-[13px] leading-[1.7] whitespace-pre-wrap break-words text-zinc-400">
       {text}
-    </Box>
+    </pre>
   );
 }
 
-/**
- * Renders the email body content for the detail view.
- *
- * When both body_html and body_text are available, a toggle lets the user
- * switch between the rendered HTML view and the plain-text fallback.
- * When only one format is present the toggle is hidden and that format
- * is rendered directly.
- *
- * HTML is rendered inside a sandboxed iframe via the srcDoc attribute.
- * Script execution, form submission, and navigation are all disabled.
- * dangerouslySetInnerHTML is never used.
- */
+function SkeletonBody() {
+  return (
+    <div className="space-y-2 py-1">
+      {[100, 94, 88, 96, 78, 85, 60].map((w, i) => (
+        <div
+          key={i}
+          className="h-3 rounded-full bg-white/[0.05] animate-pulse"
+          style={{ width: `${w}%` }}
+        />
+      ))}
+    </div>
+  );
+}
+
 export function EmailBodyViewer({ email, isLoading }: EmailBodyViewerProps) {
   const hasHtml = Boolean(email?.body_html);
   const hasText = Boolean(email?.body_text);
   const hasBoth = hasHtml && hasText;
 
   const [viewMode, setViewMode] = useState<ViewMode>("html");
-
   const effectiveMode: ViewMode =
     hasHtml && (!hasText || viewMode === "html") ? "html" : "text";
 
   return (
-    <Card variant="outlined">
-      <CardHeader
-        avatar={<EmailIcon color="action" fontSize="small" />}
-        title={
-          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0, transition: { duration: 0.3, delay: 0.1 } }}
+      className="rounded-xl border border-white/[0.07] bg-white/[0.02] overflow-hidden"
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between px-5 py-3.5 border-b border-white/[0.06]">
+        <div className="flex items-center gap-2">
+          <Mail size={13} className="text-zinc-600" />
+          <span className="text-[12px] font-semibold text-zinc-300 tracking-tight">
             Message
-          </Typography>
-        }
-        action={
-          hasBoth ? (
-            <ToggleButtonGroup
-              value={viewMode}
-              exclusive
-              onChange={(_, val) => val && setViewMode(val)}
-              size="small"
-              sx={{ mr: 1 }}
-            >
-              <ToggleButton value="html" sx={{ fontSize: "0.7rem", py: 0.25, px: 1 }}>
-                HTML
-              </ToggleButton>
-              <ToggleButton value="text" sx={{ fontSize: "0.7rem", py: 0.25, px: 1 }}>
-                Plain
-              </ToggleButton>
-            </ToggleButtonGroup>
-          ) : null
-        }
-        sx={{ pb: 0 }}
-      />
+          </span>
+        </div>
 
-      <Divider sx={{ mt: 1 }} />
+        {hasBoth && !isLoading && (
+          <div className="flex items-center rounded-lg border border-white/[0.08] bg-white/[0.03] p-0.5 gap-0.5">
+            {(["html", "text"] as ViewMode[]).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setViewMode(mode)}
+                className={cn(
+                  "text-[10px] font-semibold px-2.5 py-1 rounded-md transition-all duration-150 uppercase tracking-wide",
+                  viewMode === mode
+                    ? "bg-white/[0.1] text-zinc-200"
+                    : "text-zinc-600 hover:text-zinc-400"
+                )}
+              >
+                {mode === "html" ? "HTML" : "Plain"}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
-      <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+      {/* Body */}
+      <div className="px-5 py-4">
         {isLoading ? (
-          <Box>
-            <Skeleton variant="text" width="100%" height={16} />
-            <Skeleton variant="text" width="95%" height={16} />
-            <Skeleton variant="text" width="88%" height={16} />
-            <Skeleton variant="text" width="92%" height={16} />
-            <Skeleton variant="text" width="60%" height={16} />
-          </Box>
+          <SkeletonBody />
         ) : !hasHtml && !hasText ? (
-          <Typography variant="body2" color="text.disabled">
+          <p className="text-[12px] text-zinc-600 italic py-4 text-center">
             No message body available.
-          </Typography>
+          </p>
         ) : effectiveMode === "html" && email?.body_html ? (
           <HtmlBodyFrame html={email.body_html} />
         ) : email?.body_text ? (
           <TextBody text={email.body_text} />
         ) : null}
-      </CardContent>
-    </Card>
+      </div>
+    </motion.div>
   );
 }
 

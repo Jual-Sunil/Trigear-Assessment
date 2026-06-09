@@ -1,29 +1,17 @@
-import {
-  Box,
-  Button,
-  Skeleton,
-  Typography,
-} from "@mui/material";
-import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import { useNavigate } from "react-router-dom";
+import { motion } from "framer-motion";
+import { ArrowLeft } from "lucide-react";
 import type { EmailDetail } from "../../services/api/types";
 
 export interface EmailHeaderProps {
-  /** Full email record; undefined while loading. */
   email: EmailDetail | undefined;
-  /** When true, renders skeleton placeholders instead of content. */
   isLoading: boolean;
 }
 
-/**
- * Formats an ISO date string to a full locale date and time representation.
- *
- * @param iso - ISO 8601 date string.
- * @returns Human-readable date/time string.
- */
 function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString(undefined, {
-    month: "long",
+    weekday: "short",
+    month: "short",
     day: "numeric",
     year: "numeric",
     hour: "2-digit",
@@ -31,52 +19,59 @@ function formatDateTime(iso: string): string {
   });
 }
 
-/**
- * Renders the email detail page header.
- *
- * Contains the back navigation button, email subject as the page title,
- * and the formatted sender / received-at line below the subject.
- * Renders skeleton placeholders for all text fields while data is loading.
- */
+function SkeletonHeader() {
+  return (
+    <div className="mb-8">
+      <div className="h-3 w-24 rounded-full bg-white/[0.06] animate-pulse mb-5" />
+      <div className="h-6 w-3/5 rounded-lg bg-white/[0.07] animate-pulse mb-3" />
+      <div className="h-3 w-2/5 rounded-full bg-white/[0.04] animate-pulse" />
+    </div>
+  );
+}
+
 export function EmailHeader({ email, isLoading }: EmailHeaderProps) {
   const navigate = useNavigate();
 
+  if (isLoading) return <SkeletonHeader />;
+
   return (
-    <Box sx={{ mb: 3 }}>
-      <Button
-        startIcon={<ArrowBackIcon />}
+    <motion.div
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0, transition: { duration: 0.25 } }}
+      className="mb-8"
+    >
+      <button
         onClick={() => navigate("/emails")}
-        size="small"
-        sx={{ mb: 2 }}
+        className="group inline-flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-300 mb-5 transition-colors duration-150 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 rounded"
       >
+        <ArrowLeft
+          size={13}
+          className="group-hover:-translate-x-0.5 transition-transform duration-150"
+        />
         Back to Emails
-      </Button>
+      </button>
 
-      {isLoading ? (
-        <>
-          <Skeleton variant="text" width="60%" height={36} sx={{ mb: 0.5 }} />
-          <Skeleton variant="text" width="40%" height={20} />
-        </>
-      ) : (
-        <>
-          <Typography
-            variant="h5"
-            sx={{ fontWeight: 700, lineHeight: 1.3, mb: 0.5 }}
-          >
-            {email?.subject ?? "(No subject)"}
-          </Typography>
+      <h1 className="text-[1.35rem] font-semibold text-zinc-50 leading-snug tracking-tight mb-2">
+        {email?.subject ?? "(No subject)"}
+      </h1>
 
-          <Typography variant="body2" color="text.secondary">
-            {email?.sender_name
-              ? `${email.sender_name} <${email.sender_email}>`
-              : email?.sender_email ?? ""}
-            {email?.received_at
-              ? `  ·  ${formatDateTime(email.received_at)}`
-              : ""}
-          </Typography>
-        </>
-      )}
-    </Box>
+      <p className="text-[12px] text-zinc-500 leading-relaxed">
+        {email?.sender_name ? (
+          <>
+            <span className="text-zinc-400 font-medium">{email.sender_name}</span>
+            <span className="text-zinc-700 mx-1">&lt;{email.sender_email}&gt;</span>
+          </>
+        ) : (
+          <span className="text-zinc-400">{email?.sender_email ?? ""}</span>
+        )}
+        {email?.received_at && (
+          <>
+            <span className="mx-2 text-zinc-700">·</span>
+            <span>{formatDateTime(email.received_at)}</span>
+          </>
+        )}
+      </p>
+    </motion.div>
   );
 }
 

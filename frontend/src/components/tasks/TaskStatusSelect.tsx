@@ -1,16 +1,9 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  Chip,
-  CircularProgress,
-  FormControl,
-  MenuItem,
-  Select,
-  type SelectChangeEvent,
-} from "@mui/material";
+import { Loader2, ChevronDown } from "lucide-react";
 import { updateTask } from "../../services/api/taskApi";
 import type { Task } from "../../services/api/types";
+import { cn } from "../../lib/utils";
 
-/** All valid task status values accepted by PATCH /tasks/{id}. */
 export const TASK_STATUS_OPTIONS = [
   "pending",
   "in_progress",
@@ -20,42 +13,49 @@ export const TASK_STATUS_OPTIONS = [
 
 export type TaskStatus = (typeof TASK_STATUS_OPTIONS)[number];
 
-/**
- * Maps a task status string to a MUI Chip colour token.
- *
- * @param status - Task status value, or null.
- * @returns MUI colour token for the Chip component.
- */
-export function statusChipColor(
-  status: string | null
-): "default" | "primary" | "success" | "error" {
-  switch (status) {
-    case "pending":
-      return "default";
-    case "in_progress":
-      return "primary";
-    case "done":
-      return "success";
-    case "cancelled":
-      return "error";
-    default:
-      return "default";
-  }
+export interface StatusMeta {
+  label: string;
+  dot: string;
+  text: string;
+  bg: string;
+  ring: string;
 }
 
+export const STATUS_META: Record<string, StatusMeta> = {
+  pending: {
+    label: "Pending",
+    dot: "bg-zinc-600",
+    text: "text-zinc-400",
+    bg: "bg-zinc-800/60",
+    ring: "ring-zinc-700/40",
+  },
+  in_progress: {
+    label: "In Progress",
+    dot: "bg-sky-400",
+    text: "text-sky-300",
+    bg: "bg-sky-500/10",
+    ring: "ring-sky-500/20",
+  },
+  done: {
+    label: "Done",
+    dot: "bg-emerald-500",
+    text: "text-emerald-400",
+    bg: "bg-emerald-500/10",
+    ring: "ring-emerald-500/20",
+  },
+  cancelled: {
+    label: "Cancelled",
+    dot: "bg-zinc-700",
+    text: "text-zinc-600",
+    bg: "bg-zinc-800/40",
+    ring: "ring-zinc-700/30",
+  },
+};
+
 export interface TaskStatusSelectProps {
-  /** Task record owning the status field to update. */
   task: Task;
 }
 
-/**
- * Inline status selector for a single task.
- *
- * Fires PATCH /tasks/{id} on change via a TanStack Query mutation,
- * then invalidates the "tasks" query cache to trigger a fresh list fetch.
- * Renders a loading spinner overlay on the select while the mutation is in-flight
- * and disables the control to prevent concurrent updates on the same task.
- */
 export function TaskStatusSelect({ task }: TaskStatusSelectProps) {
   const queryClient = useQueryClient();
 
@@ -66,44 +66,46 @@ export function TaskStatusSelect({ task }: TaskStatusSelectProps) {
     },
   });
 
-  function handleChange(e: SelectChangeEvent<string>) {
-    mutate(e.target.value);
-  }
+  const current = task.status ?? "pending";
+  const meta = STATUS_META[current] ?? STATUS_META.pending;
 
   return (
-    <FormControl size="small" variant="standard" disabled={isPending}>
-      <Select
-        value={task.status ?? "pending"}
-        onChange={handleChange}
-        disableUnderline
-        startAdornment={
-          isPending ? (
-            <CircularProgress
-              size={12}
-              sx={{ mr: 0.5, color: "text.secondary" }}
-            />
-          ) : null
-        }
-        sx={{ minWidth: 130 }}
+    <div className="relative inline-flex items-center">
+      <select
+        value={current}
+        disabled={isPending}
+        onChange={(e) => mutate(e.target.value)}
+        className={cn(
+          "appearance-none cursor-pointer font-medium text-[11px] pl-5 pr-6 py-1 rounded-full ring-1 ring-inset transition-all duration-150",
+          "focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20",
+          "disabled:cursor-wait disabled:opacity-60",
+          meta.bg,
+          meta.ring,
+          meta.text
+        )}
       >
         {TASK_STATUS_OPTIONS.map((s) => (
-          <MenuItem key={s} value={s}>
-            <Chip
-              label={s.replace("_", " ")}
-              size="small"
-              color={statusChipColor(s)}
-              sx={{
-                cursor: "pointer",
-                textTransform: "capitalize",
-                fontSize: "0.7rem",
-                height: 20,
-                fontWeight: 500,
-              }}
-            />
-          </MenuItem>
+          <option key={s} value={s} className="bg-zinc-900 text-zinc-200">
+            {STATUS_META[s]?.label ?? s}
+          </option>
         ))}
-      </Select>
-    </FormControl>
+      </select>
+
+      {/* Left dot or spinner */}
+      <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2">
+        {isPending ? (
+          <Loader2 size={8} className="animate-spin text-zinc-500" />
+        ) : (
+          <span className={cn("block h-1.5 w-1.5 rounded-full", meta.dot)} />
+        )}
+      </span>
+
+      {/* Right chevron */}
+      <ChevronDown
+        size={9}
+        className={cn("pointer-events-none absolute right-2 top-1/2 -translate-y-1/2", meta.text)}
+      />
+    </div>
   );
 }
 

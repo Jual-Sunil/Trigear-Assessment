@@ -1,25 +1,24 @@
-import { Box, Typography } from "@mui/material";
+import { motion } from "framer-motion";
 import { JobList } from "../../components/jobs/JobList";
 
-/**
- * Job opportunities page.
- *
- * Lists all job opportunities extracted from the authenticated user's emails,
- * sorted by nearest deadline ascending.
- * Delegates all data-fetching, sorting, loading, and error handling
- * to the JobList component.
- *
- * Owns the page heading and top-level layout only.
- */
 export function Component() {
   return (
-    <Box>
-      <Typography variant="h5" sx={{ fontWeight: 700, mb: 3 }}>
-        Job Opportunities
-      </Typography>
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0, transition: { duration: 0.3 } }}
+      className="min-h-screen bg-[#0a0a0b] text-white max-w-[1200px] mx-auto px-4 py-8 md:px-8 md:py-10"
+    >
+      <div className="mb-8">
+        <p className="text-[10px] font-semibold tracking-[0.18em] uppercase text-zinc-600 mb-0.5">
+          Intelligence
+        </p>
+        <h1 className="text-xl font-semibold tracking-tight text-zinc-50">
+          Job Opportunities
+        </h1>
+      </div>
 
       <JobList />
-    </Box>
+    </motion.div>
   );
 }
 

@@ -222,7 +222,7 @@
 }
 
 /* ─── Stat Cards ─────────────────────────────── */
-.stats-grid {
+/*.stats-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: var(--space-4);
@@ -266,7 +266,7 @@
   margin-top: var(--space-2);
   color: var(--text-tertiary);
 }
-
+*/
 /* ─── Data Table / List ──────────────────────── */
 .data-table {
   background: var(--bg-surface);
@@ -360,7 +360,10 @@
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
   color: var(--text-primary);
-  truncate: true;
+
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .email-time {

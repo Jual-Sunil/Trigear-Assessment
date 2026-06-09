@@ -1,65 +1,48 @@
-import { Chip } from "@mui/material";
-import type { ChipProps } from "@mui/material";
+import { cn } from "../../lib/utils";
 
 export interface EmailPriorityChipProps {
-  /** Numeric priority score in the range 0–100, or null when unavailable. */
   priorityScore: number | null;
-  /** MUI Chip size. Defaults to "small". */
-  size?: ChipProps["size"];
+  size?: "xs" | "sm";
+  className?: string;
 }
 
-interface PriorityTier {
+interface Tier {
   label: string;
-  color: ChipProps["color"];
+  style: string;
 }
 
-/**
- * Resolves a numeric 0–100 priority score to a display tier.
- *
- * @param score - Raw priority score.
- * @returns Tier label and MUI colour token.
- */
-function resolveTier(score: number): PriorityTier {
-  if (score >= 80) return { label: `${score} · Critical`, color: "error" };
-  if (score >= 60) return { label: `${score} · High`, color: "warning" };
-  if (score >= 40) return { label: `${score} · Medium`, color: "info" };
-  return { label: `${score} · Low`, color: "default" };
+function resolveTier(score: number): Tier {
+  if (score >= 80) return { label: `${score} · Critical`, style: "bg-rose-500/15 text-rose-400 ring-rose-500/25" };
+  if (score >= 60) return { label: `${score} · High`,     style: "bg-amber-500/15 text-amber-400 ring-amber-500/25" };
+  if (score >= 40) return { label: `${score} · Medium`,   style: "bg-sky-500/15 text-sky-400 ring-sky-500/20" };
+  return             { label: `${score} · Low`,            style: "bg-zinc-500/10 text-zinc-500 ring-zinc-500/15" };
 }
 
-/**
- * Renders a compact MUI Chip that communicates both the raw priority
- * score and its human-readable tier (Critical / High / Medium / Low).
- *
- * Null scores render as a neutral "—" chip. Scores ≥ 70 (the threshold
- * used by the Important Emails widget) are guaranteed to display in the
- * High or Critical tier, providing immediate visual signal.
- */
 export function EmailPriorityChip({
   priorityScore,
-  size = "small",
+  size = "sm",
+  className,
 }: EmailPriorityChipProps) {
+  const base =
+    "inline-flex items-center font-medium ring-1 ring-inset rounded-full select-none whitespace-nowrap tabular-nums";
+  const sizing = size === "xs"
+    ? "text-[10px] px-1.5 py-px leading-4"
+    : "text-[11px] px-2 py-0.5 leading-4";
+
   if (priorityScore === null || priorityScore === undefined) {
     return (
-      <Chip
-        label="—"
-        size={size}
-        color="default"
-        variant="outlined"
-        sx={{ fontSize: "0.7rem", height: 20 }}
-      />
+      <span className={cn(base, sizing, "bg-zinc-800/60 text-zinc-600 ring-zinc-700/40", className)}>
+        —
+      </span>
     );
   }
 
-  const { label, color } = resolveTier(priorityScore);
+  const { label, style } = resolveTier(priorityScore);
 
   return (
-    <Chip
-      label={label}
-      size={size}
-      color={color}
-      variant="filled"
-      sx={{ fontSize: "0.7rem", height: 20, fontWeight: 500 }}
-    />
+    <span className={cn(base, sizing, style, className)}>
+      {label}
+    </span>
   );
 }
 
