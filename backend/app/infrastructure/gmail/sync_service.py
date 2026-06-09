@@ -15,17 +15,23 @@ the stored history cursor on success.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parseaddr
+from time import perf_counter
 from typing import Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from application.services.email_processing_service import EmailProcessingService
+from application.services.email_processing_service import (
+    EmailProcessingOutcome,
+    EmailProcessingService,
+)
+from core.config import get_settings
 from infrastructure.database.models.email import Email
 from infrastructure.database.repositories.email_repository import EmailRepository
 from infrastructure.database.repositories.email_sync_state_repository import (
@@ -145,6 +151,7 @@ class EmailSyncService:
         Returns:
             A :class:`SyncResult` summarising what was persisted.
         """
+        sync_start = perf_counter()
         state = await self._sync_state_repo.get_or_create_for_user(user_id)
 
         if state.history_id is None:
@@ -161,15 +168,18 @@ class EmailSyncService:
         await self._sync_state_repo.update_history_id(user_id, result.history_id)
         await self._sync_state_repo.update_last_synced_at(user_id)
 
+        total_duration = perf_counter() - sync_start
         logger.info(
-            "Sync complete for user %s — synced=%d skipped=%d failed=%d "
-            "history_id=%r full_sync=%s.",
-            user_id,
-            result.synced,
-            result.skipped,
-            result.failed,
-            result.history_id,
-            result.full_sync,
+            "sync_completed",
+            extra={
+                "user_id": str(user_id),
+                "synced": result.synced,
+                "skipped": result.skipped,
+                "failed": result.failed,
+                "history_id": result.history_id,
+                "full_sync": result.full_sync,
+                "total_sync_seconds": round(total_duration, 4),
+            },
         )
         return result
 
@@ -293,12 +303,24 @@ class EmailSyncService:
     ) -> tuple[int, int, int]:
         """Hydrate, persist, and AI-process a batch of message references.
 
-        For each reference, checks for an existing record using
-        ``gmail_message_id`` as the uniqueness key before fetching the full
-        message payload from the API. Newly persisted records are immediately
-        passed to :class:`EmailProcessingService` for synchronous AI pipeline
-        execution. Processing failures are isolated per message and do not
-        affect the sync counters of other messages in the batch.
+        The batch is processed in distinct phases to maximise throughput while
+        keeping the shared, non-concurrency-safe :class:`AsyncSession` writes
+        serialized:
+
+        1. **Dedup** — a single batched existence query removes refs already
+           persisted (and in-batch duplicates).
+        2. **Fetch** — full message payloads are fetched from Gmail
+           concurrently, bounded by ``gmail_fetch_concurrency``.
+        3. **Persist new records** — email rows are created serially on the
+           session.
+        4. **Classify** — all new emails are classified in a single batched
+           zero-shot inference call.
+        5. **Compute** — the remaining AI stages run concurrently across emails,
+           bounded by ``email_processing_concurrency`` (blocking LLM/ML calls
+           are offloaded to worker threads), performing no database writes.
+        6. **Persist results** — computed outcomes are written serially.
+
+        Per-message failures are isolated and do not affect other messages.
 
         Args:
             user_id: UUID of the owning user.
@@ -307,31 +329,159 @@ class EmailSyncService:
         Returns:
             A three-tuple of ``(synced, skipped, failed)`` counts.
         """
-        synced = skipped = failed = 0
+        settings = get_settings()
+        synced = failed = 0
+        timings = {
+            "gmail_fetch": 0.0,
+            "classification": 0.0,
+            "ai_processing": 0.0,
+            "db_persist": 0.0,
+        }
 
+        # Phase 1 — batched dedup (existing records + in-batch duplicates).
+        ordered_ids: list[str] = []
+        seen: set[str] = set()
         for ref in refs:
-            already_exists = await self._email_repo.gmail_message_exists(
-                ref.message_id
-            )
-            if already_exists:
-                skipped += 1
-                continue
+            if ref.message_id not in seen:
+                seen.add(ref.message_id)
+                ordered_ids.append(ref.message_id)
 
+        existing = await self._email_repo.existing_gmail_message_ids(ordered_ids)
+        new_ids = [mid for mid in ordered_ids if mid not in existing]
+        skipped = len(refs) - len(new_ids)
+
+        if not new_ids:
+            return synced, skipped, failed
+
+        # Phase 2 — concurrent message fetch, bounded by a semaphore.
+        fetch_sem = asyncio.Semaphore(settings.gmail_fetch_concurrency)
+
+        async def _fetch(message_id: str) -> GmailMessage:
+            async with fetch_sem:
+                return await self._client.fetch_message(message_id)
+
+        fetch_start = perf_counter()
+        fetch_results = await asyncio.gather(
+            *(_fetch(mid) for mid in new_ids),
+            return_exceptions=True,
+        )
+        timings["gmail_fetch"] = perf_counter() - fetch_start
+
+        # Phase 3 — create email records serially on the shared session.
+        db_start = perf_counter()
+        emails: list[Email] = []
+        for message_id, fetch_result in zip(new_ids, fetch_results):
+            if isinstance(fetch_result, BaseException):
+                logger.exception(
+                    "Failed to fetch message %r for user %s.",
+                    message_id,
+                    user_id,
+                    exc_info=fetch_result,
+                )
+                failed += 1
+                continue
             try:
-                message = await self._client.fetch_message(ref.message_id)
-                email_record = _normalize_message(user_id, message)
+                email_record = _normalize_message(user_id, fetch_result)
                 await self._email_repo.create(email_record)
-                await self._processing_service.process(email_record)
-                synced += 1
+                emails.append(email_record)
             except Exception:
                 logger.exception(
-                    "Failed to process message %r for user %s.",
-                    ref.message_id,
+                    "Failed to persist message %r for user %s.",
+                    message_id,
                     user_id,
                 )
                 failed += 1
+        timings["db_persist"] += perf_counter() - db_start
 
+        if not emails:
+            self._log_batch_timings(user_id, len(emails), timings)
+            return synced, skipped, failed
+
+        # Phase 4 — batched classification (single zero-shot inference call).
+        classifications: list = [None] * len(emails)
+        per_email_classification_duration: float | None = None
+        if settings.classification_batch_enabled:
+            classification_start = perf_counter()
+            classifications = await asyncio.to_thread(
+                self._processing_service.classify_batch, emails
+            )
+            classification_elapsed = perf_counter() - classification_start
+            timings["classification"] = classification_elapsed
+            per_email_classification_duration = (
+                classification_elapsed / len(emails) if emails else None
+            )
+
+        # Phase 5 — concurrent AI compute (no DB writes), bounded by a semaphore.
+        process_sem = asyncio.Semaphore(settings.email_processing_concurrency)
+
+        async def _compute(
+            email: Email, classification
+        ) -> EmailProcessingOutcome:
+            async with process_sem:
+                return await self._processing_service.compute(
+                    email,
+                    has_tasks=False,
+                    has_job=False,
+                    has_interview=False,
+                    precomputed_classification=classification,
+                    classification_duration=per_email_classification_duration,
+                )
+
+        ai_start = perf_counter()
+        outcomes = await asyncio.gather(
+            *(
+                _compute(email, classification)
+                for email, classification in zip(emails, classifications)
+            ),
+            return_exceptions=True,
+        )
+        timings["ai_processing"] = perf_counter() - ai_start
+
+        # Phase 6 — persist computed outcomes serially on the shared session.
+        persist_start = perf_counter()
+        for email, outcome in zip(emails, outcomes):
+            if isinstance(outcome, BaseException):
+                logger.exception(
+                    "Failed to process message %r for user %s.",
+                    email.gmail_message_id,
+                    user_id,
+                    exc_info=outcome,
+                )
+                failed += 1
+                continue
+            try:
+                await self._processing_service.persist(email, outcome)
+                synced += 1
+            except Exception:
+                logger.exception(
+                    "Failed to persist AI results for message %r (user %s).",
+                    email.gmail_message_id,
+                    user_id,
+                )
+                failed += 1
+        timings["db_persist"] += perf_counter() - persist_start
+
+        self._log_batch_timings(user_id, len(emails), timings)
         return synced, skipped, failed
+
+    @staticmethod
+    def _log_batch_timings(
+        user_id: uuid.UUID,
+        email_count: int,
+        timings: dict[str, float],
+    ) -> None:
+        """Emit a structured per-batch timing log to surface phase bottlenecks."""
+        logger.info(
+            "message_batch_processed",
+            extra={
+                "user_id": str(user_id),
+                "email_count": email_count,
+                "gmail_fetch_seconds": round(timings["gmail_fetch"], 4),
+                "classification_seconds": round(timings["classification"], 4),
+                "ai_processing_seconds": round(timings["ai_processing"], 4),
+                "db_persist_seconds": round(timings["db_persist"], 4),
+            },
+        )
 
 
 # ---------------------------------------------------------------------------

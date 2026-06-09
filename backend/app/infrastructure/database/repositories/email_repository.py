@@ -5,10 +5,14 @@ from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
+from typing import Any, Optional
 
 from infrastructure.database.models.email import Email
 from infrastructure.database.repositories.base import BaseRepository
+
+# Sentinel marking an "unset" keyword argument so callers can distinguish
+# "do not change this column" from "set this column to None".
+_UNSET: Any = object()
 
 
 class EmailRepository(BaseRepository[Email]):
@@ -54,6 +58,31 @@ class EmailRepository(BaseRepository[Email]):
             ``True`` if a matching record exists, otherwise ``False``.
         """
         return await self.exists([Email.gmail_message_id == gmail_message_id])
+
+    async def existing_gmail_message_ids(
+        self,
+        gmail_message_ids: list[str],
+    ) -> set[str]:
+        """Return the subset of the given Gmail message IDs that already exist.
+
+        Performs deduplication for a batch of message references in a single
+        ``SELECT ... WHERE gmail_message_id IN (...)`` query instead of one
+        existence check per message.
+
+        Args:
+            gmail_message_ids: Candidate Gmail message IDs to check.
+
+        Returns:
+            The set of IDs from the input that are already persisted.
+        """
+        if not gmail_message_ids:
+            return set()
+
+        stmt = select(Email.gmail_message_id).where(
+            Email.gmail_message_id.in_(gmail_message_ids)
+        )
+        result = await self._session.execute(stmt)
+        return set(result.scalars().all())
 
     async def get_by_user_id(
         self,
@@ -329,6 +358,56 @@ class EmailRepository(BaseRepository[Email]):
                 "summary": summary,
             },
         )
+
+    async def update_ai_fields(
+        self,
+        email: Email,
+        *,
+        classification: Any = _UNSET,
+        confidence_score: Any = _UNSET,
+        priority_score: Any = _UNSET,
+        summary: Any = _UNSET,
+    ) -> Email:
+        """Update an email's AI-derived fields on the in-hand ORM instance.
+
+        Unlike the per-field ``update_*`` helpers, this method writes directly
+        to the supplied instance (which is already attached to the session)
+        instead of re-fetching it by ``gmail_message_id``, and applies all
+        provided fields in a single ``flush``. This eliminates the redundant
+        ``SELECT`` and the multiple flush/refresh round trips incurred when
+        persisting classification, priority, and summary separately.
+
+        Only fields explicitly provided (i.e. not left as the ``_UNSET``
+        sentinel) are modified, so callers can persist any subset of results.
+
+        Args:
+            email: The session-attached email instance to update.
+            classification: New classification label, if provided.
+            confidence_score: New confidence score, if provided.
+            priority_score: New priority score, if provided.
+            summary: New summary text, if provided.
+
+        Returns:
+            The updated :class:`Email` instance.
+        """
+        updates: dict[str, Any] = {}
+        if classification is not _UNSET:
+            updates["classification"] = classification
+        if confidence_score is not _UNSET:
+            updates["confidence_score"] = confidence_score
+        if priority_score is not _UNSET:
+            updates["priority_score"] = priority_score
+        if summary is not _UNSET:
+            updates["summary"] = summary
+
+        if not updates:
+            return email
+
+        for field, value in updates.items():
+            setattr(email, field, value)
+        self._session.add(email)
+        await self._session.flush()
+        return email
 
     async def get_without_embedding(
         self,

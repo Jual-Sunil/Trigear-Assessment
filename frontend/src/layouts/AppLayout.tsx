@@ -17,7 +17,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { useAuthStore } from "../store/authStore";
-import { apiClient } from "../services/api/client";
+import { postLogout } from "../services/api/authApi";
 import { syncEmails } from "../services/api/sync";
 
 /* ── Nav config ─────────────────────────────── */
@@ -70,9 +70,9 @@ export function AppLayout() {
 
   async function handleLogout() {
     setUserMenuOpen(false);
-    await apiClient.post("/auth/logout");
     clearAuth();
     navigate("/login");
+    postLogout().catch(() => {});
   }
 
   async function handleSyncEmails() {
@@ -171,7 +171,10 @@ export function AppLayout() {
             <button
               className="al-user-menu-item al-user-menu-item--danger"
               role="menuitem"
-              onClick={handleLogout}
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                handleLogout();
+              }}
             >
               <LogOut size={13} strokeWidth={2} aria-hidden="true" />
               Sign out

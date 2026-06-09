@@ -179,6 +179,86 @@ class ZeroShotClassifier(BaseClassifier):
             method=self.method_name,
         )
 
+    def classify_many(
+        self,
+        inputs: list[EmailClassificationInput],
+    ) -> list[ClassificationResult]:
+        """Classify a batch of emails in a single zero-shot inference call.
+
+        The HuggingFace zero-shot pipeline accepts a list of sequences and runs
+        them as one batch, which is substantially faster than issuing one call
+        per email. Each result is normalised exactly as in :meth:`classify`, so
+        outputs are identical to per-email classification.
+
+        Args:
+            inputs: Validated email classification inputs.
+
+        Returns:
+            A list of classification results aligned with ``inputs``.
+
+        Raises:
+            ClassifierNotReadyError: If the model has not been loaded.
+            ClassificationInputError: If any input produces empty text.
+            ClassificationInferenceError: If the underlying pipeline fails.
+            LowConfidenceError: If a best category score is below threshold.
+        """
+        if not inputs:
+            return []
+
+        self.load()
+        self._assert_ready()
+
+        cleaned_texts = [
+            _strip_invisible_unicode(self._assert_input_has_text(input_data))
+            for input_data in inputs
+        ]
+        pipeline = cast(Callable[..., object], self.__class__._pipeline)
+
+        try:
+            raw_outputs = pipeline(
+                cleaned_texts,
+                candidate_labels=EMAIL_CATEGORIES,
+                hypothesis_template="This email is about {}.",
+                multi_label=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ClassificationInferenceError(
+                self.__class__.__name__,
+                "Zero-shot batch inference failed.",
+                cause=exc,
+            ) from exc
+
+        if isinstance(raw_outputs, dict):
+            raw_outputs = [raw_outputs]
+        if not isinstance(raw_outputs, list) or len(raw_outputs) != len(inputs):
+            raise ClassificationInferenceError(
+                self.__class__.__name__,
+                "Zero-shot batch inference returned an unexpected response shape.",
+            )
+
+        results: list[ClassificationResult] = []
+        for input_data, raw_output in zip(inputs, raw_outputs):
+            scores = self._normalize_predictions(raw_output)
+            best_score = scores[0]
+            if best_score.score < self._confidence_threshold:
+                raise LowConfidenceError(
+                    self.__class__.__name__,
+                    best_score.category,
+                    best_score.score,
+                    self._confidence_threshold,
+                )
+            results.append(
+                ClassificationResult(
+                    gmail_message_id=input_data.gmail_message_id,
+                    category=best_score.category,
+                    confidence_score=best_score.score,
+                    all_scores=scores,
+                    method=self.method_name,
+                )
+            )
+
+        return results
+
     def _normalize_predictions(self, raw_output: object) -> list[CategoryScore]:
         """Normalize HuggingFace output into sorted category scores.
 
