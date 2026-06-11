@@ -30,5 +30,5 @@ celery.conf.update(
     worker_prefetch_multiplier=1,
 )
 
-# Auto-discover task modules.
-celery.autodiscover_tasks(["tasks"])
+# Explicitly include task modules so the worker registers them.
+celery.conf.update(include=["tasks.sync_tasks"])
