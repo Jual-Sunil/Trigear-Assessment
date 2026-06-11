@@ -1,16 +1,16 @@
 """FastAPI application factory and ASGI entrypoint."""
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
+from api.router import api_router
 from core.config import get_settings
 from core.logging import configure_logging, get_logger
 from infrastructure.database.session import dispose_engine, get_engine
-from api.router import api_router
 
 logger = get_logger(__name__)
 
@@ -19,8 +19,9 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application startup and shutdown lifecycle.
 
-    Initialises the database engine on startup and disposes it cleanly
-    on shutdown.
+    Initialises the database engine on startup, pre-loads the zero-shot
+    classification model so the first sync avoids a multi-minute cold
+    start, and disposes resources cleanly on shutdown.
 
     Args:
         app: The FastAPI application instance.
@@ -38,6 +39,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Eagerly validate the database connection pool on startup.
     get_engine()
     logger.info("database_pool_initialized")
+
+    # Pre-load the BART zero-shot classification model in a background
+    # thread so the first sync request doesn't block for ~2 minutes.
+    import asyncio
+
+    from infrastructure.ai.classification.zero_shot_classifier import ZeroShotClassifier
+
+    classifier = ZeroShotClassifier()
+    await asyncio.to_thread(classifier.load)
+    logger.info("classification_model_preloaded")
 
     yield
 

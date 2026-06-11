@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from json import JSONDecodeError
 from typing import Any
 
@@ -121,6 +122,9 @@ class CareerExtractionService:
     ) -> CareerExtractionResult:
         """Execute a single extraction attempt deterministically.
 
+        The job-opportunity and interview LLM calls run concurrently in a
+        two-thread pool so their latencies overlap instead of summing.
+
         Args:
             provider: Configured LLM provider instance.
             request: Career extraction request DTO.
@@ -137,14 +141,23 @@ class CareerExtractionService:
             body=request.body,
         )
 
-        job_payload_text = self._call_provider(
-            provider, system_prompt=job_system, user_prompt=job_user
-        )
-        job_payload = self._parse_json_object(job_payload_text)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            job_future = pool.submit(
+                self._call_provider,
+                provider,
+                system_prompt=job_system,
+                user_prompt=job_user,
+            )
+            interview_future = pool.submit(
+                self._call_provider,
+                provider,
+                system_prompt=interview_system,
+                user_prompt=interview_user,
+            )
+            job_payload_text = job_future.result()
+            interview_payload_text = interview_future.result()
 
-        interview_payload_text = self._call_provider(
-            provider, system_prompt=interview_system, user_prompt=interview_user
-        )
+        job_payload = self._parse_json_object(job_payload_text)
         interview_payload = self._parse_json_object(interview_payload_text)
 
         merged_payload: dict[str, Any] = {}

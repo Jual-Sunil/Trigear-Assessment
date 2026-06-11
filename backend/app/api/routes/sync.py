@@ -1,45 +1,52 @@
 """
 Email synchronization routes.
 
-Exposes endpoints to trigger an incremental Gmail sync and to query
-the current sync state for the authenticated user. The sync runs
-directly via EmailSyncService without a background queue.
+Exposes endpoints to trigger a Gmail sync (via Celery background worker
+or inline fallback) and to query the current sync state for the
+authenticated user.
 """
 
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps.auth import get_current_user
 from api.deps.database import get_db
+from application.services.email_processing_service import EmailProcessingService
 from core.logging import get_logger
+from infrastructure.auth.auth_service import AuthService
 from infrastructure.database.models.user import User
+from infrastructure.database.repositories.email_repository import EmailRepository
 from infrastructure.database.repositories.email_sync_state_repository import (
     EmailSyncStateRepository,
 )
-from infrastructure.auth.auth_service import AuthService
+from infrastructure.database.repositories.interview_repository import (
+    InterviewRepository,
+)
+from infrastructure.database.repositories.job_opportunity_repository import (
+    JobOpportunityRepository,
+)
+from infrastructure.database.repositories.oauth_token_repository import (
+    OAuthTokenRepository,
+)
+from infrastructure.database.repositories.task_repository import TaskRepository
+from infrastructure.database.repositories.user_repository import UserRepository
 from infrastructure.gmail.client import GmailClient
 from infrastructure.gmail.sync_service import EmailSyncService
-from infrastructure.database.repositories.email_repository import EmailRepository
-from infrastructure.database.repositories.oauth_token_repository import OAuthTokenRepository
-from infrastructure.database.repositories.user_repository import UserRepository
-from infrastructure.database.repositories.task_repository import TaskRepository
-from infrastructure.database.repositories.job_opportunity_repository import JobOpportunityRepository
-from infrastructure.database.repositories.interview_repository import InterviewRepository
-from application.services.email_processing_service import EmailProcessingService
 
 logger = get_logger(__name__)
 router = APIRouter()
 
 
 class SyncTriggerResponse(BaseModel):
-    """Response body returned when a sync completes or is initiated."""
+    """Response body returned when a sync completes or is dispatched."""
 
     status: str
     user_id: str
+    task_id: Optional[str] = None
 
 
 class SyncStatusResponse(BaseModel):
@@ -61,56 +68,81 @@ class SyncStatusResponse(BaseModel):
 @router.post(
     "",
     response_model=SyncTriggerResponse,
-    status_code=status.HTTP_200_OK,
+    status_code=status.HTTP_202_ACCEPTED,
     summary="Trigger email synchronization",
     description=(
-        "Runs an incremental Gmail sync for the authenticated user synchronously. "
-        "Returns after the sync completes."
+        "Dispatches an email sync job to a Celery background worker and "
+        "returns immediately. Pass ?async=false to run inline (blocking)."
     ),
 )
 async def trigger_sync(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    run_async: bool = Query(
+        default=True,
+        alias="async",
+        description="Dispatch via Celery (true) or run inline (false).",
+    ),
 ) -> SyncTriggerResponse:
-    """
-    Execute a Gmail synchronization for the authenticated user.
+    """Trigger a Gmail synchronization for the authenticated user.
 
-    Runs the sync directly via EmailSyncService. The access token is
-    obtained from the stored OAuth credentials and the sync strategy
-    (full or incremental) is determined by the stored history cursor.
+    By default the sync is dispatched to a Celery background worker so the
+    HTTP response returns in < 1 s.  Pass ``?async=false`` to run the sync
+    inline (blocking) — useful for development or when no Celery worker is
+    available.
 
     Args:
         current_user: The authenticated User ORM instance.
         db: Injected async database session.
+        run_async: When ``True`` (default), dispatch to Celery.
 
     Returns:
-        SyncTriggerResponse: Confirms the sync has run with the user's ID.
+        SyncTriggerResponse with either ``"queued"`` or ``"completed"``
+        status, plus the Celery ``task_id`` when dispatched asynchronously.
     """
-    
     logger.info(
-        f"Starting sync for user_id={current_user.id} email={current_user.email}",
+        "sync_requested",
+        extra={
+            "user_id": str(current_user.id),
+            "email": current_user.email,
+            "async": run_async,
+        },
     )
 
+    if run_async:
+        from tasks.sync_tasks import sync_emails
+
+        task = sync_emails.delay(str(current_user.id))
+        logger.info(
+            "sync_dispatched_to_celery",
+            extra={"user_id": str(current_user.id), "task_id": task.id},
+        )
+        return SyncTriggerResponse(
+            status="queued",
+            user_id=str(current_user.id),
+            task_id=task.id,
+        )
+
+    # Inline (blocking) fallback — preserves the original V2 behaviour.
     user_repo = UserRepository(db)
     token_repo = OAuthTokenRepository(db)
-    logger.info("Creating AuthService")
     auth_service = AuthService(user_repo=user_repo, token_repo=token_repo)
-    logger.info("Creating repositories")
     email_repo = EmailRepository(db)
     sync_state_repo = EmailSyncStateRepository(db)
     task_repo = TaskRepository(db)
     job_repo = JobOpportunityRepository(db)
     interview_repo = InterviewRepository(db)
-    logger.info("Creating EmailProcessingService")
+
     email_processing_service = EmailProcessingService(
         email_repository=email_repo,
         task_repository=task_repo,
         job_opportunity_repository=job_repo,
         interview_repository=interview_repo,
-        # AI services have default implementations (no args needed)
     )
-    logger.info("Opening Gmail client")
-    async with GmailClient(user_id=current_user.id, auth_service=auth_service) as gmail_client:
+
+    async with GmailClient(
+        user_id=current_user.id, auth_service=auth_service
+    ) as gmail_client:
         sync_service = EmailSyncService(
             session=db,
             gmail_client=gmail_client,

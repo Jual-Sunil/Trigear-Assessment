@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from uuid import UUID
 
+from core.constants import CAREER_ELIGIBLE_CATEGORIES
 from infrastructure.ai.career_extraction.career_extraction_service import (
     CareerExtractionService,
 )
@@ -59,7 +60,10 @@ from infrastructure.database.models.email import Email
 from infrastructure.database.models.interview import Interview
 from infrastructure.database.models.job_opportunity import JobOpportunity
 from infrastructure.database.models.task import Task
-from infrastructure.database.repositories.email_repository import _UNSET, EmailRepository
+from infrastructure.database.repositories.email_repository import (
+    _UNSET,
+    EmailRepository,
+)
 from infrastructure.database.repositories.interview_repository import (
     InterviewRepository,
 )
@@ -443,13 +447,30 @@ class EmailProcessingService:
         has_interview: bool,
         timings: dict[str, float],
     ) -> CareerExtractionResult | None:
-        """Run career extraction under a stage timer (concurrency-friendly wrapper)."""
+        """Run career extraction under a stage timer (concurrency-friendly wrapper).
+
+        Career extraction is only executed for emails classified into one of
+        the :data:`~core.constants.CAREER_ELIGIBLE_CATEGORIES` (Work,
+        Interview, Job Opportunity).  All other categories are skipped to
+        save LLM token usage.
+        """
         if has_job and has_interview:
             logger.debug(
                 "career_extraction_skipped_records_exist",
                 extra={"email_id": str(email.id)},
             )
             return None
+
+        if email.classification not in CAREER_ELIGIBLE_CATEGORIES:
+            logger.debug(
+                "career_extraction_skipped_ineligible_category",
+                extra={
+                    "email_id": str(email.id),
+                    "classification": email.classification,
+                },
+            )
+            return None
+
         with _stage_timer(timings, "career_extraction"):
             return await self._compute_career_extraction(email, summary_result)
 

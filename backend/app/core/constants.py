@@ -28,6 +28,15 @@ EMAIL_CATEGORY_NEWSLETTER: Final[str] = "Newsletter"
 EMAIL_CATEGORY_SPAM: Final[str] = "Spam"
 EMAIL_CATEGORY_OTHER: Final[str] = "Other"
 
+# Categories that warrant career-extraction (job opportunities / interviews).
+CAREER_ELIGIBLE_CATEGORIES: Final[frozenset[str]] = frozenset(
+    {
+        EMAIL_CATEGORY_WORK,
+        EMAIL_CATEGORY_INTERVIEW,
+        EMAIL_CATEGORY_JOB_OPPORTUNITY,
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Task Status Values
 # ---------------------------------------------------------------------------
