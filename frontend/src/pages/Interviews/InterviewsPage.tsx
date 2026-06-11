@@ -1,25 +1,24 @@
-import { Box, Typography } from "@mui/material";
+import { motion } from "framer-motion";
 import { InterviewList } from "../../components/interviews/InterviewList";
 
-/**
- * Interviews page.
- *
- * Lists all interviews extracted from the authenticated user's emails,
- * sorted by nearest interview date ascending.
- * Delegates all data-fetching, sorting, loading, and error handling
- * to the InterviewList component.
- *
- * Owns the page heading and top-level layout only.
- */
 export function Component() {
   return (
-    <Box>
-      <Typography variant="h5" sx={{ fontWeight: 700, mb: 3 }}>
-        Interviews
-      </Typography>
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0, transition: { duration: 0.3 } }}
+      className="min-h-screen bg-[#0a0a0b] text-white max-w-[1200px] mx-auto px-4 py-8 md:px-8 md:py-10"
+    >
+      <div className="mb-8">
+        <p className="text-[10px] font-semibold tracking-[0.18em] uppercase text-zinc-600 mb-0.5">
+          Schedule
+        </p>
+        <h1 className="text-xl font-semibold tracking-tight text-zinc-50">
+          Interviews
+        </h1>
+      </div>
 
       <InterviewList />
-    </Box>
+    </motion.div>
   );
 }
 

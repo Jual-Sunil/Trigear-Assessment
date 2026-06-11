@@ -1,27 +1,13 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  Alert,
-  Box,
-  Card,
-  CardContent,
-  Divider,
-  Grid,
-  Skeleton,
-  Typography,
-} from "@mui/material";
+import { motion, AnimatePresence } from "framer-motion";
+import { CalendarDays, ChevronDown } from "lucide-react";
 import { fetchInterviews } from "../../services/api/interviewApi";
 import type { Interview, InterviewListResponse } from "../../services/api/types";
 import { InterviewCard } from "./InterviewCard";
+import { cn } from "../../lib/utils";
 
-/**
- * Sorts interviews by interview_date ascending (nearest date first).
- * Interviews with no date are placed at the end.
- * Past interviews sort before null-date records but after upcoming ones,
- * preserving their chronological order for reference.
- *
- * @param interviews - Unsorted array of Interview records.
- * @returns New sorted array; the input is not mutated.
- */
+// Preserved exactly
 function sortInterviews(interviews: Interview[]): Interview[] {
   return [...interviews].sort((a, b) => {
     const da = a.interview_date ? new Date(a.interview_date).getTime() : Infinity;
@@ -30,82 +16,205 @@ function sortInterviews(interviews: Interview[]): Interview[] {
   });
 }
 
-/**
- * Skeleton placeholder matching the approximate height of an InterviewCard.
- */
-function InterviewCardSkeleton() {
+function isPast(iso: string | null): boolean {
+  if (!iso) return false;
+  return new Date(iso) < new Date();
+}
+
+// ── Filter config ─────────────────────────────────────────────────────────────
+
+const FILTER_TABS = [
+  { value: "upcoming", label: "Upcoming" },
+  { value: "all",      label: "All" },
+  { value: "past",     label: "Past" },
+] as const;
+
+type FilterTab = (typeof FILTER_TABS)[number]["value"];
+
+const SORT_OPTIONS = [
+  { value: "date",    label: "Date" },
+  { value: "company", label: "Company" },
+  { value: "role",    label: "Role" },
+] as const;
+
+type SortOption = (typeof SORT_OPTIONS)[number]["value"];
+
+// ── Skeleton ──────────────────────────────────────────────────────────────────
+
+function SkeletonCard() {
   return (
-    <Card variant="outlined" sx={{ height: "100%" }}>
-      <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
-        <Skeleton variant="text" width="35%" height={14} sx={{ mb: 0.5 }} />
-        <Skeleton variant="text" width="65%" height={22} sx={{ mb: 1.25 }} />
-        <Divider sx={{ my: 1 }} />
-        <Box sx={{ display: "flex", gap: 1, mb: 1.5, alignItems: "center" }}>
-          <Skeleton variant="text" width="55%" height={14} />
-          <Skeleton variant="rounded" width={60} height={20} />
-        </Box>
-        <Skeleton variant="rounded" width={108} height={30} />
-      </CardContent>
-    </Card>
+    <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 h-[210px] flex flex-col gap-3">
+      <div className="flex items-start gap-3">
+        <div className="w-12 h-14 rounded-xl bg-white/[0.05] animate-pulse flex-shrink-0" />
+        <div className="flex-1 space-y-2">
+          <div className="h-2.5 w-1/3 rounded-full bg-white/[0.04] animate-pulse" />
+          <div className="h-3.5 w-3/5 rounded-full bg-white/[0.07] animate-pulse" />
+          <div className="h-4 w-16 rounded-full bg-white/[0.05] animate-pulse" />
+        </div>
+      </div>
+      <div className="border-t border-white/[0.05]" />
+      <div className="h-2.5 w-3/5 rounded-full bg-white/[0.04] animate-pulse" />
+      <div className="mt-auto h-7 w-28 rounded-lg bg-white/[0.05] animate-pulse" />
+    </div>
   );
 }
 
-/**
- * Renders the full list of interviews.
- *
- * Fetches interviews via GET /interviews using TanStack Query, sorts them
- * by nearest interview_date ascending, and renders each as an InterviewCard
- * in a responsive MUI Grid.
- *
- * Handles loading state with skeleton cards, surfaces an Alert on
- * fetch failure, and renders an empty state message when no interviews exist.
- */
+// ── Empty state ───────────────────────────────────────────────────────────────
+
+function EmptyState({ filtered }: { filtered: boolean }) {
+  return (
+    <div className="col-span-full flex flex-col items-center justify-center py-20 text-center">
+      <span className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-white/[0.03] border border-white/[0.07] mb-5">
+        <CalendarDays size={22} className="text-zinc-600" />
+      </span>
+      <p className="text-sm font-semibold text-zinc-400 mb-1">
+        {filtered ? "No interviews match this filter" : "No interviews scheduled"}
+      </p>
+      <p className="text-xs text-zinc-600 max-w-[210px] leading-relaxed">
+        {filtered
+          ? "Try switching to All to see every interview."
+          : "Interviews extracted from your emails will appear here."}
+      </p>
+    </div>
+  );
+}
+
+// ── Tab button ────────────────────────────────────────────────────────────────
+
+function Tab({
+  label,
+  active,
+  count,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  count?: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-3 py-1.5 rounded-lg transition-all duration-150 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20",
+        active
+          ? "bg-white/[0.09] text-zinc-100"
+          : "text-zinc-600 hover:text-zinc-400 hover:bg-white/[0.04]"
+      )}
+    >
+      {label}
+      {count !== undefined && (
+        <span
+          className={cn(
+            "text-[10px] tabular-nums px-1.5 py-0.5 rounded-full font-semibold",
+            active ? "bg-white/[0.12] text-zinc-300" : "bg-white/[0.04] text-zinc-700"
+          )}
+        >
+          {count}
+        </span>
+      )}
+    </button>
+  );
+}
+
+// ── List ──────────────────────────────────────────────────────────────────────
+
 export function InterviewList() {
+  const [activeTab, setActiveTab] = useState<FilterTab>("upcoming");
+  const [sort, setSort] = useState<SortOption>("date");
+
   const { data, isLoading, isError } = useQuery<InterviewListResponse>({
     queryKey: ["interviews"],
     queryFn: fetchInterviews,
   });
 
-  const interviews = data ? sortInterviews(data.items) : [];
+  const sorted = data ? sortInterviews(data.items) : [];
+
+  const filtered = sorted.filter((iv) => {
+    if (activeTab === "upcoming") return !isPast(iv.interview_date);
+    if (activeTab === "past") return isPast(iv.interview_date);
+    return true;
+  });
+
+  const display = [...filtered].sort((a, b) => {
+    if (sort === "company") return (a.company ?? "").localeCompare(b.company ?? "");
+    if (sort === "role")    return (a.role ?? "").localeCompare(b.role ?? "");
+    const da = a.interview_date ? new Date(a.interview_date).getTime() : Infinity;
+    const db = b.interview_date ? new Date(b.interview_date).getTime() : Infinity;
+    return da - db;
+  });
+
+  const countFor = (tab: FilterTab) => {
+    if (!data) return undefined;
+    if (tab === "upcoming") return sorted.filter((iv) => !isPast(iv.interview_date)).length;
+    if (tab === "past")     return sorted.filter((iv) => isPast(iv.interview_date)).length;
+    return sorted.length;
+  };
 
   if (isError) {
     return (
-      <Alert severity="error">
-        Failed to load interviews. Please try again.
-      </Alert>
-    );
-  }
-
-  if (isLoading) {
-    return (
-      <Grid container spacing={2}>
-        {Array.from({ length: 6 }).map((_, i) => (
-          <Grid key={i} size={{ xs: 12, sm: 6, lg: 4 }}>
-            <InterviewCardSkeleton />
-          </Grid>
-        ))}
-      </Grid>
-    );
-  }
-
-  if (interviews.length === 0) {
-    return (
-      <Box sx={{ py: 8, display: "flex", justifyContent: "center" }}>
-        <Typography variant="body2" color="text.secondary">
-          No interviews found.
-        </Typography>
-      </Box>
+      <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 px-4 py-3 text-sm text-rose-400">
+        Failed to load interviews. Please refresh.
+      </div>
     );
   }
 
   return (
-    <Grid container spacing={2}>
-      {interviews.map((interview) => (
-        <Grid key={interview.id} size={{ xs: 12, sm: 6, lg: 4 }}>
-          <InterviewCard interview={interview} />
-        </Grid>
-      ))}
-    </Grid>
+    <div>
+      {/* Toolbar */}
+      <div className="flex items-center justify-between gap-3 mb-5 flex-wrap">
+        <div className="flex items-center gap-0.5">
+          {FILTER_TABS.map((tab) => (
+            <Tab
+              key={tab.value}
+              label={tab.label}
+              active={activeTab === tab.value}
+              count={isLoading ? undefined : countFor(tab.value)}
+              onClick={() => setActiveTab(tab.value)}
+            />
+          ))}
+        </div>
+
+        <div className="relative">
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as SortOption)}
+            className="appearance-none cursor-pointer bg-white/[0.04] hover:bg-white/[0.07] border border-white/[0.08] rounded-lg text-[11.5px] text-zinc-400 pl-3 pr-7 py-1.5 transition-colors duration-150 focus:outline-none focus:ring-1 focus:ring-white/20"
+          >
+            {SORT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value} className="bg-zinc-900 text-zinc-200">
+                Sort: {o.label}
+              </option>
+            ))}
+          </select>
+          <ChevronDown
+            size={10}
+            className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-600"
+          />
+        </div>
+      </div>
+
+      {/* Grid */}
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={`${activeTab}-${sort}`}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1, transition: { duration: 0.2 } }}
+          exit={{ opacity: 0, transition: { duration: 0.1 } }}
+          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"
+        >
+          {isLoading ? (
+            Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)
+          ) : display.length === 0 ? (
+            <EmptyState filtered={activeTab !== "all"} />
+          ) : (
+            display.map((interview, i) => (
+              <InterviewCard key={interview.id} interview={interview} index={i} />
+            ))
+          )}
+        </motion.div>
+      </AnimatePresence>
+    </div>
   );
 }
 
