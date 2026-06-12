@@ -19,6 +19,7 @@ import asyncio
 import base64
 import logging
 import uuid
+import httpx
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parseaddr
@@ -261,36 +262,46 @@ class EmailSyncService:
         latest_history_id = start_history_id
         added_refs: list[GmailMessageRef] = []
 
-        while True:
-            history_page = await self._client.fetch_history(
-                start_history_id,
-                history_types=[_HISTORY_TYPE_MESSAGES_ADDED],
-                page_token=page_token,
+        try:
+            while True:
+                history_page = await self._client.fetch_history(
+                    start_history_id,
+                    history_types=[_HISTORY_TYPE_MESSAGES_ADDED],
+                    page_token=page_token,
+                )
+
+                if history_page.history_id:
+                    latest_history_id = history_page.history_id
+
+                for record in history_page.history:
+                    added_refs.extend(record.messages_added)
+
+                if history_page.next_page_token is None:
+                    break
+                page_token = history_page.next_page_token
+
+            if added_refs:
+                synced, skipped, failed = await self._process_message_refs(
+                    user_id, added_refs
+                )
+
+            return SyncResult(
+                user_id=user_id,
+                synced=synced,
+                skipped=skipped,
+                failed=failed,
+                history_id=latest_history_id,
+                full_sync=False,
             )
-
-            if history_page.history_id:
-                latest_history_id = history_page.history_id
-
-            for record in history_page.history:
-                added_refs.extend(record.messages_added)
-
-            if history_page.next_page_token is None:
-                break
-            page_token = history_page.next_page_token
-
-        if added_refs:
-            synced, skipped, failed = await self._process_message_refs(
-                user_id, added_refs
-            )
-
-        return SyncResult(
-            user_id=user_id,
-            synced=synced,
-            skipped=skipped,
-            failed=failed,
-            history_id=latest_history_id,
-            full_sync=False,
-        )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                logger.warning(
+                    "History ID %r expired for user %s; falling back to full sync.",
+                    start_history_id,
+                    user_id,
+                )
+                return await self._full_sync(user_id)
+            raise
 
     # ------------------------------------------------------------------
     # Message processing
@@ -372,13 +383,23 @@ class EmailSyncService:
         emails: list[Email] = []
         for message_id, fetch_result in zip(new_ids, fetch_results):
             if isinstance(fetch_result, BaseException):
-                logger.exception(
-                    "Failed to fetch message %r for user %s.",
-                    message_id,
-                    user_id,
-                    exc_info=fetch_result,
-                )
-                failed += 1
+                if (
+                    isinstance(fetch_result, httpx.HTTPStatusError)
+                    and fetch_result.response.status_code == 404
+                ):
+                    logger.debug(
+                        "Message %r no longer exists (404); skipping (deleted/trashed before sync).",
+                        message_id,
+                    )
+                    skipped += 1
+                else:
+                    logger.exception(
+                        "Failed to fetch message %r for user %s.",
+                        message_id,
+                        user_id,
+                        exc_info=fetch_result,
+                    )
+                    failed += 1
                 continue
             try:
                 email_record = _normalize_message(user_id, fetch_result)
