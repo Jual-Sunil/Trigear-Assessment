@@ -189,6 +189,10 @@ class CareerExtractionRequest(BaseModel):
         default=None,
         description="Email body text or summary context.",
     )
+    body_html: str | None = Field(
+        default=None,
+        description="Raw HTML body for link extraction when body_text is absent/useless.",
+    )
 
     model_config = {"str_strip_whitespace": True, "frozen": True}
 

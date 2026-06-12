@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from json import JSONDecodeError
 from typing import Any
 from uuid import UUID
@@ -200,6 +201,8 @@ class TaskExtractionService:
                         "Task extraction failed after exhausting retries.",
                         cause=exc,
                     ) from exc
+                delay = min(2.0 * (2 ** (attempt - 1)), 8.0)
+                time.sleep(delay)
 
         assert last_exc is not None
         raise TaskExtractionFailureError(

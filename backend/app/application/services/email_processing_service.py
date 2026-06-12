@@ -24,6 +24,11 @@ from time import perf_counter
 from uuid import UUID
 
 from core.constants import CAREER_ELIGIBLE_CATEGORIES
+
+# Categories for which LLM-based summarization and task extraction are
+# skipped because they almost never contain actionable content.
+_SUMMARY_SKIP_CATEGORIES: frozenset[str] = frozenset({"Spam", "Promotion", "Newsletter"})
+_TASK_SKIP_CATEGORIES: frozenset[str] = frozenset({"Spam", "Promotion", "Newsletter"})
 from infrastructure.ai.career_extraction.career_extraction_service import (
     CareerExtractionService,
 )
@@ -266,17 +271,43 @@ class EmailProcessingService:
             email.classification = classification_result.category
             email.confidence_score = classification_result.confidence_score
 
+        # Priority scoring (deterministic) and summarization (LLM) are
+        # independent once classification is known — run concurrently.
+        need_priority = email.priority_score is None
+        need_summary = (
+            email.summary is None
+            and email.classification not in _SUMMARY_SKIP_CATEGORIES
+        )
+
         priority_result: PriorityScoreResult | None = None
-        if email.priority_score is None:
+        summary_result: EmailSummaryResult | None = None
+
+        async def _priority_task() -> PriorityScoreResult | None:
+            if not need_priority:
+                return None
             with _stage_timer(timings, "priority"):
-                priority_result = await self._run_priority_scoring(email)
+                return await self._run_priority_scoring(email)
+
+        async def _summary_task() -> EmailSummaryResult | None:
+            if not need_summary:
+                if email.summary is None and email.classification in _SUMMARY_SKIP_CATEGORIES:
+                    logger.debug(
+                        "summarization_skipped_low_value_category",
+                        extra={
+                            "email_id": str(email.id),
+                            "classification": email.classification,
+                        },
+                    )
+                return None
+            with _stage_timer(timings, "summarization"):
+                return await self._run_summarization(email)
+
+        priority_result, summary_result = await asyncio.gather(
+            _priority_task(), _summary_task()
+        )
+
         if priority_result is not None:
             email.priority_score = priority_result.priority_score
-
-        summary_result: EmailSummaryResult | None = None
-        if email.summary is None:
-            with _stage_timer(timings, "summarization"):
-                summary_result = await self._run_summarization(email)
         if summary_result is not None:
             email.summary = summary_result.summary
 
@@ -434,6 +465,15 @@ class EmailProcessingService:
             logger.debug(
                 "task_extraction_skipped_tasks_exist",
                 extra={"email_id": str(email.id)},
+            )
+            return None
+        if email.classification in _TASK_SKIP_CATEGORIES:
+            logger.debug(
+                "task_extraction_skipped_low_value_category",
+                extra={
+                    "email_id": str(email.id),
+                    "classification": email.classification,
+                },
             )
             return None
         with _stage_timer(timings, "task_extraction"):
@@ -764,9 +804,20 @@ class EmailProcessingService:
             # Summaries collapse job alert emails to one-liners that lose all
             # structured data. Use body_text when available, fall back to the
             # summary only when no body content exists at all.
+            #
+            # Some emails have useless body_text (e.g. "Please Enable
+            # Javascript") while all actual content is in body_html.  Treat
+            # very short body_text (<50 chars) as absent so the link
+            # extractor + snippet can fill the gap.
+            usable_body = email.body_text
+            if usable_body and len(usable_body.strip()) < 50:
+                usable_body = None
+
             body_context = (
-                email.body_text
-                if email.body_text
+                usable_body
+                if usable_body
+                else email.snippet
+                if email.snippet
                 else summary_result.summary
                 if summary_result is not None
                 else None
@@ -776,6 +827,7 @@ class EmailProcessingService:
                 subject=email.subject,
                 sender=email.sender_email,
                 body=body_context,
+                body_html=email.body_html,
             )
 
             result: CareerExtractionResult = await asyncio.to_thread(

@@ -64,11 +64,26 @@ async def _run_sync(user_id_str: str) -> dict:
             job_repo = JobOpportunityRepository(session)
             interview_repo = InterviewRepository(session)
 
+            from infrastructure.ai.llm.provider_factory import LLMProviderFactory
+            from infrastructure.ai.summarization.summarization_service import (
+                SummarizationService,
+            )
+            from infrastructure.ai.task_extraction.task_extraction_service import (
+                TaskExtractionService,
+            )
+            from infrastructure.ai.career_extraction.career_extraction_service import (
+                CareerExtractionService,
+            )
+
+            shared_provider = LLMProviderFactory().create_provider()
             email_processing_service = EmailProcessingService(
                 email_repository=email_repo,
                 task_repository=task_repo,
                 job_opportunity_repository=job_repo,
                 interview_repository=interview_repo,
+                summarization_service=SummarizationService(provider=shared_provider),
+                task_extraction_service=TaskExtractionService(provider=shared_provider),
+                career_extraction_service=CareerExtractionService(provider=shared_provider),
             )
 
             async with GmailClient(
