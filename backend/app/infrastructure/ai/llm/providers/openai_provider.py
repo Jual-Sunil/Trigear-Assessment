@@ -82,16 +82,25 @@ class OpenAIProvider(BaseLLMProvider):
         """
         self._assert_ready()
 
+        # Detect whether the caller expects JSON output (task/career extraction
+        # prompts all ask for JSON).  When the prompt says "JSON", enforce
+        # structured output mode so the model cannot return malformed text.
+        wants_json = "json" in system_prompt.lower() or "json" in user_prompt[:200].lower()
+
         try:
-            completion = self._client.chat.completions.create(
-                model=self._settings.openai_model,
-                messages=[
+            kwargs: dict = {
+                "model": self._settings.openai_model,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=self._settings.llm_temperature,
-                max_tokens=self._settings.llm_max_tokens,
-            )
+                "temperature": self._settings.llm_temperature,
+                "max_tokens": self._settings.llm_max_tokens,
+            }
+            if wants_json:
+                kwargs["response_format"] = {"type": "json_object"}
+
+            completion = self._client.chat.completions.create(**kwargs)
             content = completion.choices[0].message.content
             if not isinstance(content, str) or not content.strip():
                 raise LLMProviderResponseValidationError(

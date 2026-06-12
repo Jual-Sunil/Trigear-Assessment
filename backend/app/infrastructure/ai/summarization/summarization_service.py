@@ -47,7 +47,7 @@ Rules:
 - Be professional and neutral in tone.
 """
 
-_MAX_BODY_CHARS = 8_000
+_MAX_BODY_CHARS = 4_000
 
 
 class SummarizationService:
@@ -90,6 +90,11 @@ class SummarizationService:
     def summarize(self, request: EmailSummaryRequest) -> EmailSummaryResult:
         """Generate a structured summary for a single email.
 
+        Uses ``provider.complete()`` directly with the module-level
+        ``_SYSTEM_PROMPT`` so that the prompt is constructed exactly once
+        (avoiding the double-prompt issue where both service and provider
+        wrapped the same content).
+
         Args:
             request: Validated summarisation input containing the email content
                 and contextual metadata.
@@ -105,9 +110,14 @@ class SummarizationService:
             EmailSummarizationError: When a non-recoverable provider failure
                 occurs.
         """
-        summary_request = self._build_summary_request(request)
-        raw_response = self._invoke_with_retry(summary_request)
-        return self._parse_response(raw_response, email_id=request.email_id)
+        user_prompt = self._format_user_prompt(
+            subject=request.subject or "",
+            sender=request.sender or "",
+            body=request.body or "",
+            received_at=request.received_at,
+        )
+        raw_text = self._invoke_complete_with_retry(_SYSTEM_PROMPT, user_prompt)
+        return self._parse_complete_response(raw_text, email_id=request.email_id)
 
     # ------------------------------------------------------------------
     # Request construction
@@ -202,15 +212,19 @@ class SummarizationService:
     # Provider invocation
     # ------------------------------------------------------------------
 
-    def _invoke_with_retry(self, request: SummaryRequest) -> SummaryResponse:
-        """Attempt provider invocation with exponential back-off retry.
+    def _invoke_complete_with_retry(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        """Call ``provider.complete()`` with retry logic.
 
         Args:
-            request: Validated LLM provider request.
+            system_prompt: System-level instruction for the LLM.
+            user_prompt: User-facing prompt with email content.
 
         Returns:
-            A :class:`~infrastructure.ai.llm.schemas.SummaryResponse` from the
-            provider.
+            Raw text string from the LLM.
 
         Raises:
             EmailSummarizationError: When all retry attempts are exhausted.
@@ -219,7 +233,7 @@ class SummarizationService:
 
         for attempt in range(1, self._max_retries + 1):
             try:
-                return self._provider.summarize(request)
+                return self._provider.complete(system_prompt, user_prompt)
             except LLMProviderError as exc:
                 last_error = exc
                 logger.warning(
@@ -229,7 +243,8 @@ class SummarizationService:
                     exc,
                 )
                 if attempt < self._max_retries:
-                    time.sleep(self._retry_delay * attempt)
+                    delay = min(self._retry_delay * (2 ** (attempt - 1)), 8.0)
+                    time.sleep(delay)
 
         raise EmailSummarizationError(
             f"LLM provider failed after {self._max_retries} attempt(s).",
@@ -240,44 +255,51 @@ class SummarizationService:
     # Response parsing and validation
     # ------------------------------------------------------------------
 
-    def _parse_response(
+    def _parse_complete_response(
         self,
-        response: SummaryResponse,
+        raw_text: str,
         *,
         email_id: UUID | None,
     ) -> EmailSummaryResult:
-        """Parse the raw provider response into a validated :class:`EmailSummaryResult`.
+        """Parse raw LLM text into a validated :class:`EmailSummaryResult`.
+
+        Attempts to decode the response as JSON first.  When JSON parsing
+        fails (e.g. the model returned plain prose), the raw text is used
+        as the summary directly — this is intentional to avoid losing a
+        perfectly good summary just because the model omitted JSON framing.
 
         Args:
-            response: Raw response returned by the LLM provider.
+            raw_text: Raw text string returned by ``provider.complete()``.
             email_id: Optional email identifier to embed in the result.
 
         Returns:
             A validated :class:`~infrastructure.ai.summarization.schemas.EmailSummaryResult`.
 
         Raises:
-            EmailSummaryResultValidationError: When the response cannot be
-                decoded as JSON or fails schema validation.
+            EmailSummaryResultValidationError: When the response is empty.
         """
-        logger.info(
-            "summary_response_received",
-            extra={
-                "provider": response.provider,
-                "model": response.model,
-                "summary_raw": response.summary[:1000],
-            },
-        )
-
-        summary_text = response.summary.strip()
-
-        if not summary_text:
+        text = raw_text.strip()
+        if not text:
             raise EmailSummaryResultValidationError(
                 "Provider returned an empty summary."
             )
 
+        logger.info(
+            "summary_response_received",
+            extra={"summary_raw": text[:1000]},
+        )
+
+        # Try JSON parsing first for structured output.
+        try:
+            payload = self._extract_json(text)
+            return self._validate_payload(payload, email_id=email_id)
+        except EmailSummaryResultValidationError:
+            pass
+
+        # Fallback: treat the entire text as a plain-text summary.
         return EmailSummaryResult(
             email_id=email_id,
-            summary=summary_text,
+            summary=text,
             key_points=[],
             action_items=[],
         )

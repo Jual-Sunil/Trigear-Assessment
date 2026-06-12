@@ -9,9 +9,14 @@ declaring tasks or when starting a Celery worker::
 
 from __future__ import annotations
 
+import logging
+
 from celery import Celery
+from celery.signals import worker_init
 
 from core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -32,3 +37,23 @@ celery.conf.update(
 
 # Explicitly include task modules so the worker registers them.
 celery.conf.update(include=["tasks.sync_tasks"])
+
+
+@worker_init.connect
+def _prewarm_models(**kwargs: object) -> None:
+    """Pre-load heavy ML models at worker startup so the first task is fast."""
+    try:
+        from infrastructure.ai.classification.zero_shot_classifier import (
+            ZeroShotClassifier,
+        )
+        ZeroShotClassifier().load()
+        logger.info("pre-warmed zero-shot classification model")
+    except Exception:
+        logger.warning("failed to pre-warm classification model", exc_info=True)
+
+    try:
+        from infrastructure.ai.embeddings.embedding_service import EmbeddingService
+        _ = EmbeddingService().model
+        logger.info("pre-warmed sentence-transformer embedding model")
+    except Exception:
+        logger.warning("failed to pre-warm embedding model", exc_info=True)

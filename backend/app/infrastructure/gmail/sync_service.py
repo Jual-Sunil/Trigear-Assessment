@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import logging
 import uuid
 import httpx
@@ -433,13 +434,41 @@ class EmailSyncService:
             )
 
         # Phase 5 — concurrent AI compute (no DB writes), bounded by a semaphore.
+        # Content-hash dedup: reuse the outcome of a previous email in this
+        # batch when the normalised body content is identical.
+        content_cache: dict[str, EmailProcessingOutcome] = {}
         process_sem = asyncio.Semaphore(settings.email_processing_concurrency)
 
         async def _compute(
             email: Email, classification
         ) -> EmailProcessingOutcome:
+            body = (email.body_text or email.snippet or "").strip()
+            content_hash = hashlib.sha256(body.encode()).hexdigest() if body else ""
+
+            if content_hash and content_hash in content_cache:
+                logger.debug(
+                    "content_hash_cache_hit",
+                    extra={
+                        "email_id": str(email.id),
+                        "content_hash": content_hash[:12],
+                    },
+                )
+                cached = content_cache[content_hash]
+                # Re-apply classification from this email's own batch result.
+                return EmailProcessingOutcome(
+                    classification=classification or cached.classification,
+                    priority=cached.priority,
+                    summary=cached.summary,
+                    task_result=cached.task_result,
+                    career_result=cached.career_result,
+                    skip_tasks=False,
+                    skip_job=False,
+                    skip_interview=False,
+                    timings=cached.timings.copy(),
+                )
+
             async with process_sem:
-                return await self._processing_service.compute(
+                outcome = await self._processing_service.compute(
                     email,
                     has_tasks=False,
                     has_job=False,
@@ -447,6 +476,10 @@ class EmailSyncService:
                     precomputed_classification=classification,
                     classification_duration=per_email_classification_duration,
                 )
+
+            if content_hash:
+                content_cache[content_hash] = outcome
+            return outcome
 
         ai_start = perf_counter()
         outcomes = await asyncio.gather(

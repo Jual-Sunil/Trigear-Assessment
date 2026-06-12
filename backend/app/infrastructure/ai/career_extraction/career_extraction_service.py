@@ -106,7 +106,8 @@ class CareerExtractionService:
                         cause=exc,
                     ) from exc
 
-            time.sleep(retry_delay_seconds)
+            delay = min(retry_delay_seconds * (2 ** attempt), 8.0)
+            time.sleep(delay)
 
         assert last_exc is not None
         raise CareerExtractionFailureError(
@@ -132,13 +133,31 @@ class CareerExtractionService:
         Returns:
             Validated :class:`CareerExtractionResult`.
         """
+        from infrastructure.ai.career_extraction.html_link_extractor import (
+            build_link_context,
+            extract_links_from_html,
+            extract_links_from_text,
+        )
+
+        all_links: list[tuple[str, str]] = []
+        if request.body_html:
+            all_links.extend(extract_links_from_html(request.body_html))
+        if request.body:
+            all_links.extend(extract_links_from_text(request.body))
+
+        link_context: str | None = None
+        if all_links:
+            link_context = build_link_context(all_links)
+
         job_system, job_user = build_job_opportunity_extraction_prompt(
             subject=request.subject,
             body=request.body,
+            extracted_links=link_context,
         )
         interview_system, interview_user = build_interview_extraction_prompt(
             subject=request.subject,
             body=request.body,
+            extracted_links=link_context,
         )
 
         with ThreadPoolExecutor(max_workers=2) as pool:
