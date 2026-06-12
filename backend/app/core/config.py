@@ -131,7 +131,7 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # LLM Providers
     # -------------------------------------------------------------------------
-    llm_provider: Literal["openai", "claude", "gemini", "openrouter"] = Field(default="gemini")
+    llm_provider: Literal["openai", "claude", "gemini", "openrouter", "huggingface"] = Field(default="huggingface")
     openai_api_key: str = Field(default="")
     openai_model: str = Field(default="gpt-4o")
     anthropic_api_key: str = Field(default="")
@@ -140,6 +140,8 @@ class Settings(BaseSettings):
     gemini_model: str = Field(default="gemini-1.5-pro")
     openrouter_api_key: str = Field(default="")
     openrouter_model: str = Field(default="")
+    huggingface_api_key: str = Field(default="")
+    huggingface_model: str = Field(default="meta-llama/Llama-3.1-8B-Instruct")
     llm_max_tokens: int = Field(default=2048)
     llm_temperature: float = Field(default=0.1)
     llm_max_retries: int = Field(default=3)

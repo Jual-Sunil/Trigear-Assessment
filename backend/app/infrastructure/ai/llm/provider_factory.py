@@ -9,11 +9,13 @@ from infrastructure.ai.llm.providers.claude_provider import ClaudeProvider
 from infrastructure.ai.llm.providers.gemini_provider import GeminiProvider
 from infrastructure.ai.llm.providers.openai_provider import OpenAIProvider
 from infrastructure.ai.llm.providers.openrouter_provider import OpenRouterProvider
+from infrastructure.ai.llm.providers.huggingface_provider import HuggingFaceProvider
 
 PROVIDER_CLAUDE = "claude"
 PROVIDER_OPENAI = "openai"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_OPENROUTER = "openrouter"
+PROVIDER_HUGGINGFACE = "huggingface"
 
 
 class LLMProviderFactory:
@@ -48,8 +50,10 @@ class LLMProviderFactory:
             return GeminiProvider(self._settings)
         if provider_name == PROVIDER_OPENROUTER:
             return OpenRouterProvider(self._settings)
+        if provider_name == PROVIDER_HUGGINGFACE:
+            return HuggingFaceProvider(self._settings)
 
         raise LLMProviderError(
             f"Unsupported LLM provider '{provider_name}'. "
-            f"Supported providers are: {PROVIDER_OPENAI}, {PROVIDER_CLAUDE}, {PROVIDER_GEMINI}, {PROVIDER_OPENROUTER}."
+            f"Supported providers are: {PROVIDER_OPENAI}, {PROVIDER_CLAUDE}, {PROVIDER_GEMINI}, {PROVIDER_OPENROUTER}, {PROVIDER_HUGGINGFACE}."
         )
