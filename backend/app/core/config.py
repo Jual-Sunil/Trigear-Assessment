@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     # Email Processing Concurrency
     # -------------------------------------------------------------------------
     email_processing_concurrency: int = Field(
-        default=10,
+        default=8,
         ge=1,
         le=50,
         description=(
